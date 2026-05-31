@@ -1,0 +1,23 @@
+[package]
+name = "zj-statusbar"
+version = "0.1.0"
+edition = "2021"
+description = "A Zellij status bar plugin"
+license = "MIT"
+
+[dependencies]
+zellij-tile = "0.44"
+unicode-width = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+kdl = "4.7"
+# Backend-agnostic text-input state machine (cursor + readline-style edits).
+# `default-features = false` drops the crossterm/termion backends, leaving only
+# the pure-logic core (unicode-segmentation + unicode-width), which compiles to
+# the wasm32-wasip1 target the plugin runs on.
+tui-input = { version = "0.15", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

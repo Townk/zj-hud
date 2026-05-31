@@ -1,0 +1,15 @@
+[package]
+name = "whichkey-proto"
+version = "0.0.0"
+edition = "2021"
+description = "Throwaway spike: a pinned, non-focus-stealing which-key floating panel"
+license = "MIT"
+
+[dependencies]
+zellij-tile = "0.44"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
