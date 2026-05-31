@@ -98,7 +98,11 @@ pub fn session_segment(
         return None;
     }
 
-    let text = format!("{} {}", icons::MODE_SESSION, kebab_to_title_case(session_name));
+    let text = format!(
+        "{} {}",
+        icons::MODE_SESSION,
+        kebab_to_title_case(session_name)
+    );
     Some(format_segment(bg, &text, is_last))
 }
 
@@ -378,7 +382,10 @@ mod tests {
     fn kebab_to_title_case_handles_edge_cases() {
         assert_eq!(kebab_to_title_case("dev"), "Dev");
         assert_eq!(kebab_to_title_case("my-cool-session"), "My Cool Session");
-        assert_eq!(kebab_to_title_case("-leading-trailing-"), "Leading Trailing");
+        assert_eq!(
+            kebab_to_title_case("-leading-trailing-"),
+            "Leading Trailing"
+        );
         assert_eq!(kebab_to_title_case("double--hyphen"), "Double Hyphen");
     }
 
@@ -528,8 +535,9 @@ mod tests {
         };
 
         let config = Config::default();
-        let result = info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), true, 80)
-            .expect("segment");
+        let result =
+            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), true, 80)
+                .expect("segment");
 
         // The visible part of the body should be exactly " B85  W1"
         // (1 leading space + battery + 2-space separator + wifi).

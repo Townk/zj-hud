@@ -108,20 +108,6 @@ impl WidgetState {
 
 pub struct AppState {
     pub mode: InputMode,
-    /// True only when a ModeUpdate has been received since the last active-tab
-    /// change. Stale non-Normal modes are suppressed by treating unconfirmed
-    /// mode as Normal in the renderer.
-    pub mode_confirmed: bool,
-    /// Set on every active-tab change; cleared when the async file-read that
-    /// follows the change delivers its result (or a ModeUpdate(Normal) arrives).
-    /// While true, incoming non-Normal ModeUpdates are suppressed so that the
-    /// focus-sync ModeUpdate(Tab) Zellij sends to the newly-focused plugin
-    /// cannot restore a stale mode before the shared file is read.
-    pub mode_reset_pending: bool,
-    /// Monotonically increasing ID stamped on each file-read request.
-    /// RunCommandResult responses are discarded unless their ID matches,
-    /// preventing out-of-order reads from overwriting a newer result.
-    pub mode_read_id: u64,
     pub tabs: Vec<TabInfo>,
     pub panes: HashMap<usize, Vec<PaneInfo>>,
     /// Terminal pane IDs we actually care about for `PaneRenderReport` events
@@ -162,9 +148,6 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             mode: InputMode::Normal,
-            mode_confirmed: false,
-            mode_reset_pending: false,
-            mode_read_id: 0,
             tabs: Vec::new(),
             panes: HashMap::new(),
             interesting_panes: HashSet::new(),

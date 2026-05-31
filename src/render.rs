@@ -244,14 +244,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     // dialog keeps the client in `EnterSearch` while typing, then settles in
     // `Search` for `n`/`N` navigation — collapse both to the Search indicator
     // so the bar reads "search" the whole time the dialog is up.
-    //
-    // Otherwise: only display a non-Normal mode if it was confirmed by a
-    // ModeUpdate in the current tab context. Unconfirmed mode (after a
-    // tab-focus change with no subsequent ModeUpdate) is treated as Normal to
-    // avoid stale indicators.
-    let effective_mode = if !state.mode_confirmed {
-        InputMode::Normal
-    } else if state.mode == InputMode::EnterSearch {
+    let effective_mode = if state.mode == InputMode::EnterSearch {
         InputMode::Search
     } else {
         state.mode
@@ -487,7 +480,6 @@ mod tests {
     fn right_side_has_mode_in_locked() {
         let state = AppState {
             mode: InputMode::Locked,
-            mode_confirmed: true,
             session_name: "main".to_string(),
             ..AppState::default()
         };
@@ -544,7 +536,6 @@ mod tests {
     fn mode_segment_click_resets_to_normal() {
         let state = AppState {
             mode: InputMode::Locked,
-            mode_confirmed: true,
             session_name: "main".to_string(),
             ..AppState::default()
         };

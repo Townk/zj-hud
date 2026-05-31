@@ -2886,6 +2886,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "kdl",
+ "serde",
+ "serde_json",
  "tui-input",
  "unicode-width 0.2.2",
  "zellij-tile",

@@ -41,6 +41,10 @@ pub fn should_show_system_segments(
     fullscreen_min_cols: usize,
     cols: usize,
 ) -> bool {
+    if !state.got_permissions {
+        return false;
+    }
+
     let active_tab_idx = state.active_tab_index().unwrap_or(0);
     let is_zellij_pane_fullscreen = state.any_pane_zoomed(active_tab_idx);
     let is_non_graphical = std::env::var("DISPLAY").is_err()
@@ -52,10 +56,7 @@ pub fn should_show_system_segments(
     }
 
     if is_running_in_ghostty() {
-        return state
-            .ghostty_fullscreen
-            .value
-            .unwrap_or(cols >= fullscreen_min_cols);
+        return state.ghostty_fullscreen.value.unwrap_or(false);
     }
 
     cols >= fullscreen_min_cols
@@ -170,10 +171,7 @@ pub fn refresh_pane_title_by_id(state: &mut AppState, pane_id: u32) {
         return;
     };
     for panes in state.panes.values_mut() {
-        if let Some(slot) = panes
-            .iter_mut()
-            .find(|p| p.id == pane_id && !p.is_plugin)
-        {
+        if let Some(slot) = panes.iter_mut().find(|p| p.id == pane_id && !p.is_plugin) {
             if slot.title != fresh.title {
                 slot.title = fresh.title;
                 state.dirty = true;
@@ -204,10 +202,7 @@ pub fn refresh_focused_pane_title(state: &mut AppState) {
     let Some(panes) = state.panes.get_mut(&tab_position) else {
         return;
     };
-    let Some(slot) = panes
-        .iter_mut()
-        .find(|p| p.id == fresh.id && !p.is_plugin)
-    else {
+    let Some(slot) = panes.iter_mut().find(|p| p.id == fresh.id && !p.is_plugin) else {
         return;
     };
     if slot.title != fresh.title {
@@ -241,8 +236,7 @@ fn maybe_refresh_widget(state: &mut AppState, widget: &InfoWidget) {
     ctx.insert(CTX_KEY.to_string(), CTX_WIDGET.to_string());
     ctx.insert(CTX_WIDGET_ID.to_string(), widget.id.clone());
 
-    // Same shape as the existing `mode_file_path` write: shell out so
-    // users can pipe and redirect freely.
+    // Shell out so users can pipe and redirect freely.
     run_command(&["sh", "-c", widget.command.as_str()], ctx);
 
     entry.in_flight = true;
@@ -339,6 +333,7 @@ mod tests {
     fn known_ghostty_windowed_state_overrides_column_fallback() {
         std::env::set_var("TERM_PROGRAM", "ghostty");
         let mut state = AppState::default();
+        state.got_permissions = true;
         state.ghostty_fullscreen.set(false);
 
         assert!(!should_show_system_segments(&state, 100, 120));
@@ -346,11 +341,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_ghostty_state_uses_column_fallback() {
+    fn unknown_ghostty_state_stays_hidden() {
         std::env::set_var("TERM_PROGRAM", "ghostty");
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.got_permissions = true;
 
-        assert!(should_show_system_segments(&state, 100, 120));
+        assert!(!should_show_system_segments(&state, 100, 120));
         std::env::remove_var("TERM_PROGRAM");
     }
 

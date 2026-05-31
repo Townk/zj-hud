@@ -93,8 +93,7 @@ fn compose_body(tab_position: usize, tab_name: &str, state: &AppState, config: &
                 let icon = icons::process_icon(&proc)
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| config.icons.tab_process.clone());
-                let label =
-                    pane_osc_title(&pane_with_cmd.title, &proc).unwrap_or(proc);
+                let label = pane_osc_title(&pane_with_cmd.title, &proc).unwrap_or(proc);
                 return plain_body(format!("{} {}", icon, label));
             }
         }

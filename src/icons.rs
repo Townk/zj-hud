@@ -41,7 +41,7 @@ pub fn process_icon(name: &str) -> Option<&'static str> {
         "bash" => Some("\u{E795}"),
         "brew" => Some("\u{F007B}"),
         "cargo" => Some("\u{E7A8}"),
-        "claude" => Some("\u{100076}")
+        "claude" => Some("\u{100076}"),
         "curl" => Some("\u{E241}"),
         "docker" | "docker-compose" => Some("\u{E77D}"),
         "fish" => Some("\u{F0BA5}"),
@@ -56,7 +56,7 @@ pub fn process_icon(name: &str) -> Option<&'static str> {
         "node" => Some("\u{E24F}"),
         "nvim" => Some("\u{E6AE}"),
         "pacman" | "paru" => Some("\u{F0BAF}"),
-        "pi" | "pi-coding-agent" => Some("\u{03C0}")
+        "pi" | "pi-coding-agent" => Some("\u{03C0}"),
         "psql" => Some("\u{E76E}"),
         "ruby" => Some("\u{E739}"),
         "sudo" => Some("\u{F292}"),

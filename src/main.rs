@@ -6,6 +6,7 @@ mod layout;
 mod render;
 mod search;
 mod segments;
+mod shared_state;
 mod state;
 mod system;
 mod tabs;
@@ -19,6 +20,7 @@ use zellij_tile::prelude::*;
 use click_map::ClickAction;
 use config::Config;
 use search::SearchPane;
+use shared_state::SharedState;
 use state::AppState;
 
 register_plugin!(Plugin);
@@ -61,6 +63,13 @@ impl ZellijPlugin for Plugin {
         }
     }
 
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        match self {
+            Plugin::Bar(state) => state.pipe(pipe_message),
+            Plugin::Search(_) => false,
+        }
+    }
+
     fn render(&mut self, rows: usize, cols: usize) {
         match self {
             Plugin::Bar(state) => state.render(rows, cols),
@@ -96,15 +105,15 @@ pub const PLUGIN_PERMISSIONS: &[PermissionType] = &[
 /// so faster ticks don't increase the rate of those underlying commands.
 const TIMER_INTERVAL: f64 = 1.0;
 
+/// Delay non-Normal mode publication long enough for tab-switch transients to
+/// settle. `Normal` updates bypass and cancel the delay.
+const MODE_INDICATOR_DEBOUNCE: Duration = Duration::from_millis(32);
+
 /// Minimum delay between two `RunCommand` invocations of the same `on_click`
 /// shell command. Prevents accidental double-fires from a single click.
 const CLICK_RUN_DEBOUNCE: Duration = Duration::from_millis(100);
 
 // Context keys for RunCommandResult routing.
-const CTX_MODE_READ: &str = "mode_read";
-const CTX_MODE_WRITE: &str = "mode_write";
-// Context key carrying the read-generation ID so stale responses are dropped.
-const CTX_MODE_READ_ID: &str = "mode_read_id";
 const CTX_PROJECT_ROOT: &str = "project_root";
 const CTX_PROJECT_CWD: &str = "project_cwd";
 
@@ -112,71 +121,31 @@ const CTX_PROJECT_CWD: &str = "project_cwd";
 struct State {
     app: AppState,
     config: Config,
+    statusbar_peers: Vec<u32>,
+    shared_generation: u64,
+    zellij_visible: bool,
+    saw_visible_event: bool,
+    active_tab: usize,
+    active_tab_id: Option<usize>,
+    my_tab: Option<usize>,
+    my_tab_id: Option<usize>,
+    pending_mode: Option<InputMode>,
+    pending_mode_started: Option<Instant>,
 }
 
 // ─── Mode serialisation ───────────────────────────────────────────────────────
 
-fn mode_to_str(mode: InputMode) -> &'static str {
-    match mode {
-        InputMode::Normal => "Normal",
-        InputMode::Locked => "Locked",
-        InputMode::Resize => "Resize",
-        InputMode::Pane => "Pane",
-        InputMode::Tab => "Tab",
-        InputMode::Scroll => "Scroll",
-        InputMode::EnterSearch => "EnterSearch",
-        InputMode::Search => "Search",
-        InputMode::RenameTab => "RenameTab",
-        InputMode::RenamePane => "RenamePane",
-        InputMode::Session => "Session",
-        InputMode::Move => "Move",
-        InputMode::Prompt => "Prompt",
-        InputMode::Tmux => "Tmux",
-    }
-}
-
-fn str_to_mode(s: &str) -> Option<InputMode> {
-    match s {
-        "Normal" => Some(InputMode::Normal),
-        "Locked" => Some(InputMode::Locked),
-        "Resize" => Some(InputMode::Resize),
-        "Pane" => Some(InputMode::Pane),
-        "Tab" => Some(InputMode::Tab),
-        "Scroll" => Some(InputMode::Scroll),
-        "EnterSearch" => Some(InputMode::EnterSearch),
-        "Search" => Some(InputMode::Search),
-        "RenameTab" => Some(InputMode::RenameTab),
-        "RenamePane" => Some(InputMode::RenamePane),
-        "Session" => Some(InputMode::Session),
-        "Move" => Some(InputMode::Move),
-        "Prompt" => Some(InputMode::Prompt),
-        "Tmux" => Some(InputMode::Tmux),
-        _ => None,
-    }
-}
-
-/// Session-scoped path for the shared mode state file.
-fn mode_file_path(session_name: &str) -> String {
-    session_scoped_tmp("zj-statusbar-mode", session_name)
-}
-
-/// Build `/tmp/<prefix>[-<sanitized session>]`.
-fn session_scoped_tmp(prefix: &str, session_name: &str) -> String {
-    if session_name.is_empty() {
-        format!("/tmp/{prefix}")
-    } else {
-        let safe: String = session_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        format!("/tmp/{prefix}-{safe}")
-    }
+fn sanitize_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -194,6 +163,7 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::SessionUpdate,
             EventType::PaneUpdate,
+            EventType::Visible,
             EventType::PaneRenderReport,
             EventType::CwdChanged,
             EventType::CommandChanged,
@@ -256,6 +226,27 @@ impl ZellijPlugin for State {
 // ─── Event processing ─────────────────────────────────────────────────────────
 
 impl State {
+    fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if pipe_message.name != "__zj_statusbar_sync_state" {
+            return false;
+        }
+
+        let Some(payload) = pipe_message.payload.as_deref() else {
+            return false;
+        };
+        let Ok(shared) = serde_json::from_str::<SharedState>(payload) else {
+            return false;
+        };
+
+        let incoming_generation = shared.generation;
+        let local_generation = self.shared_generation;
+        let changed = self.apply_shared_state(&shared);
+        if incoming_generation >= local_generation {
+            self.cache_shared_state(&shared);
+        }
+        changed
+    }
+
     fn process_event(&mut self, event: Event) {
         match event {
             Event::ModeUpdate(mode_info) => {
@@ -266,54 +257,34 @@ impl State {
                     self.app.session_name = name;
                 }
 
-                if self.app.mode_reset_pending && mode != InputMode::Normal {
-                    self.app.dirty = true;
-                    return;
-                }
-
-                // Mode is either Normal or non-reset-pending: it is
-                // authoritative.  Persist it to the shared file so other
-                // instances (that haven't received this ModeUpdate yet) can
-                // sync on their next tab-focus change.
-                let path = mode_file_path(&self.app.session_name);
-                let cmd = format!("printf '{}' > {}", mode_to_str(mode), path);
-                let mut ctx = BTreeMap::new();
-                ctx.insert(system::CTX_KEY.to_string(), CTX_MODE_WRITE.to_string());
-                run_command(&["sh", "-c", cmd.as_str()], ctx);
-
-                self.app.mode = mode;
-                self.app.mode_confirmed = true;
-                self.app.mode_reset_pending = false;
+                self.handle_mode_update(mode);
                 self.app.dirty = true;
             }
             Event::TabUpdate(tabs) => {
-                let old_count = self.app.tabs.len();
-                let old_active = self.app.active_tab_index();
                 self.app.tabs = tabs;
-                let new_count = self.app.tabs.len();
-                let new_active = self.app.active_tab_index();
-
-                // Zellij marks each plugin's *own* tab as active=true in TabUpdate,
-                // so old_active==new_active for P1 even when the user switches tabs.
-                // Instead, trigger on tab count change (tab added or closed), which
-                // always changes the count when the user's context has shifted.
-                if old_count != new_count || old_active != new_active {
-                    self.app.mode = InputMode::Normal;
-                    self.app.mode_confirmed = false;
-                    self.app.mode_reset_pending = true;
-                    self.start_mode_read();
+                if let Some(active) = self.app.tabs.iter().find(|tab| tab.active) {
+                    self.active_tab = active.position;
+                    self.active_tab_id = Some(active.tab_id);
                 }
+                self.sync_from_shared_state();
                 self.app.dirty = true;
             }
             Event::SessionUpdate(sessions, _) => {
                 if let Some(session) = sessions.iter().find(|s| s.is_current_session) {
                     if session.name != self.app.session_name {
                         self.app.session_name = session.name.clone();
+                        self.sync_from_shared_state();
                         self.app.dirty = true;
                     }
                 }
             }
             Event::PaneUpdate(manifest) => {
+                self.detect_my_tab(&manifest);
+                let peers_changed = self.detect_statusbar_peers(&manifest);
+                if peers_changed && self.shared_generation > 0 {
+                    self.broadcast_shared_state(&self.snapshot_shared_state());
+                }
+
                 // CwdChanged / CommandChanged only fire on changes; proactively
                 // query new panes so inactive tabs can still render cached state.
                 for panes in manifest.panes.values() {
@@ -340,6 +311,17 @@ impl State {
                 }
                 self.app.panes = manifest.panes;
                 self.app.rebuild_interesting_panes();
+                self.sync_from_shared_state();
+                self.app.dirty = true;
+            }
+            Event::Visible(is_visible) => {
+                self.saw_visible_event = true;
+                self.zellij_visible = is_visible;
+                if is_visible {
+                    self.sync_from_shared_state();
+                } else {
+                    self.clear_local_mode_indicator();
+                }
                 self.app.dirty = true;
             }
             Event::PaneRenderReport(panes) => {
@@ -371,6 +353,9 @@ impl State {
                 self.app.dirty = true;
             }
             Event::Timer(_secs) => {
+                if !self.flush_pending_mode_if_ready() {
+                    return;
+                }
                 system::maybe_refresh_ghostty_fullscreen(&mut self.app);
                 system::maybe_refresh_tz_offset(&mut self.app);
                 system::maybe_refresh_widgets(&mut self.app, &self.config);
@@ -382,28 +367,6 @@ impl State {
             }
             Event::RunCommandResult(exit_code, stdout, stderr, context) => {
                 match context.get(system::CTX_KEY).map(|s| s.as_str()) {
-                    Some(CTX_MODE_READ) => {
-                        let expected = self.app.mode_read_id.to_string();
-                        let file_content = String::from_utf8_lossy(&stdout);
-                        if context.get(CTX_MODE_READ_ID).map(|s| s.as_str())
-                            != Some(expected.as_str())
-                        {
-                            return;
-                        }
-
-                        self.app.mode_reset_pending = false;
-
-                        if exit_code == Some(0) {
-                            if let Some(mode) = str_to_mode(file_content.trim()) {
-                                self.app.mode = mode;
-                                self.app.mode_confirmed = true;
-                                self.app.dirty = true;
-                            }
-                        }
-                    }
-                    Some(CTX_MODE_WRITE) => {
-                        // Fire-and-forget write; ignore result entirely.
-                    }
                     Some(CTX_PROJECT_ROOT) => {
                         if let Some(cwd) = context.get(CTX_PROJECT_CWD).map(PathBuf::from) {
                             self.app.project_roots.in_flight.remove(&cwd);
@@ -511,15 +474,221 @@ impl State {
         switch_tab_to((next as u32) + 1);
     }
 
-    /// Kick off a generation-stamped async read of the shared mode file.
-    fn start_mode_read(&mut self) {
-        self.app.mode_read_id += 1;
-        let id = self.app.mode_read_id;
-        let path = mode_file_path(&self.app.session_name);
-        let mut ctx = BTreeMap::new();
-        ctx.insert(system::CTX_KEY.to_string(), CTX_MODE_READ.to_string());
-        ctx.insert(CTX_MODE_READ_ID.to_string(), id.to_string());
-        run_command(&["cat", path.as_str()], ctx);
+    fn handle_mode_update(&mut self, mode: InputMode) {
+        if mode == InputMode::Normal {
+            self.pending_mode = None;
+            self.pending_mode_started = None;
+            self.publish_or_sync_mode(mode);
+            return;
+        }
+
+        if self.can_publish_shared_state() {
+            self.pending_mode = Some(mode);
+            self.pending_mode_started = Some(Instant::now());
+            set_timeout(MODE_INDICATOR_DEBOUNCE.as_secs_f64());
+        } else {
+            self.sync_from_shared_state();
+        }
+    }
+
+    fn flush_pending_mode_if_ready(&mut self) -> bool {
+        let Some(mode) = self.pending_mode else {
+            return true;
+        };
+        let Some(started) = self.pending_mode_started else {
+            self.pending_mode = None;
+            return true;
+        };
+
+        let elapsed = started.elapsed();
+        if elapsed < MODE_INDICATOR_DEBOUNCE {
+            set_timeout((MODE_INDICATOR_DEBOUNCE - elapsed).as_secs_f64());
+            return false;
+        }
+
+        self.pending_mode = None;
+        self.pending_mode_started = None;
+        self.publish_or_sync_mode(mode);
+        true
+    }
+
+    fn publish_or_sync_mode(&mut self, mode: InputMode) {
+        if self.can_publish_shared_state() {
+            self.with_active_shared_state(|shared, _| {
+                shared.publish_mode_update(mode, get_plugin_ids().plugin_id)
+            });
+        } else {
+            self.sync_from_shared_state();
+        }
+    }
+
+    fn clear_local_mode_indicator(&mut self) {
+        self.pending_mode = None;
+        self.pending_mode_started = None;
+        if self.app.mode != InputMode::Normal {
+            self.app.mode = InputMode::Normal;
+            self.app.dirty = true;
+        }
+    }
+
+    fn shared_state_path(&self) -> String {
+        let session = if self.app.session_name.is_empty() {
+            "unknown".to_string()
+        } else {
+            sanitize_path_component(&self.app.session_name)
+        };
+        format!(
+            "/tmp/zj-statusbar-state-{}-{}.json",
+            get_plugin_ids().zellij_pid,
+            session
+        )
+    }
+
+    fn snapshot_shared_state(&self) -> SharedState {
+        SharedState {
+            schema_version: shared_state::SCHEMA_VERSION,
+            generation: self.shared_generation,
+            writer: get_plugin_ids().plugin_id,
+            mode: shared_state::mode_name(self.app.mode).to_string(),
+        }
+    }
+
+    fn persist_shared_state(&self, state: &SharedState) {
+        self.cache_shared_state(state);
+        self.broadcast_shared_state(state);
+    }
+
+    fn cache_shared_state(&self, state: &SharedState) {
+        let _ = shared_state::write_state_to(self.shared_state_path(), state);
+    }
+
+    fn broadcast_shared_state(&self, state: &SharedState) {
+        let Ok(payload) = serde_json::to_string(state) else {
+            return;
+        };
+        pipe_message_to_plugin(
+            MessageToPlugin::new("__zj_statusbar_sync_state").with_payload(payload),
+        );
+    }
+
+    fn sync_from_shared_state(&mut self) -> bool {
+        let shared = shared_state::read_state_from(self.shared_state_path()).unwrap_or_default();
+        self.apply_shared_state(&shared)
+    }
+
+    fn apply_shared_state(&mut self, shared: &SharedState) -> bool {
+        if shared.generation < self.shared_generation {
+            return false;
+        }
+
+        let mode = if self.is_active_instance() {
+            shared.mode()
+        } else {
+            // Passive per-tab instances should track the latest generation but
+            // not keep a stale non-Normal mode ready to flash on next reveal.
+            InputMode::Normal
+        };
+        let changed = self.app.mode != mode;
+        self.shared_generation = shared.generation;
+        if changed {
+            self.app.mode = mode;
+            self.app.dirty = true;
+        }
+        changed
+    }
+
+    fn with_active_shared_state(
+        &mut self,
+        update: impl FnOnce(SharedState, &Self) -> SharedState,
+    ) -> bool {
+        if !self.can_publish_shared_state() {
+            self.sync_from_shared_state();
+            return false;
+        }
+
+        let from_disk = shared_state::read_state_from(self.shared_state_path()).unwrap_or_default();
+        self.apply_shared_state(&from_disk);
+        let before = self.snapshot_shared_state();
+        let after = update(before.clone(), self);
+        let changed = after != before;
+        if changed {
+            self.persist_shared_state(&after);
+        }
+        self.apply_shared_state(&after);
+        changed
+    }
+
+    fn is_active_instance(&self) -> bool {
+        if self.saw_visible_event {
+            return self.zellij_visible;
+        }
+        self.my_tab == Some(self.active_tab)
+    }
+
+    fn can_publish_shared_state(&self) -> bool {
+        self.is_active_instance()
+    }
+
+    fn panes_for_manifest_tab<'a>(
+        &self,
+        manifest: &'a PaneManifest,
+        tab: &TabInfo,
+    ) -> Option<&'a Vec<PaneInfo>> {
+        manifest
+            .panes
+            .get(&tab.position)
+            .or_else(|| manifest.panes.get(&tab.tab_id))
+    }
+
+    fn detect_my_tab(&mut self, manifest: &PaneManifest) {
+        let my_id = get_plugin_ids().plugin_id;
+        for tab in &self.app.tabs {
+            let Some(panes) = self.panes_for_manifest_tab(manifest, tab) else {
+                continue;
+            };
+            if panes.iter().any(|pane| pane.is_plugin && pane.id == my_id) {
+                self.my_tab = Some(tab.position);
+                self.my_tab_id = Some(tab.tab_id);
+                return;
+            }
+        }
+
+        for (tab, panes) in &manifest.panes {
+            if panes.iter().any(|pane| pane.is_plugin && pane.id == my_id) {
+                self.my_tab = Some(*tab);
+                self.my_tab_id = None;
+                return;
+            }
+        }
+    }
+
+    fn detect_statusbar_peers(&mut self, manifest: &PaneManifest) -> bool {
+        let my_id = get_plugin_ids().plugin_id;
+        let mut peers: Vec<u32> = manifest
+            .panes
+            .values()
+            .flatten()
+            .filter(|pane| {
+                pane.is_plugin
+                    && pane.id != my_id
+                    && pane.title != search::PANE_TITLE
+                    && pane
+                        .plugin_url
+                        .as_deref()
+                        .map(|url| url.contains("zj-statusbar") || url.contains("statusbar"))
+                        .unwrap_or(false)
+            })
+            .map(|pane| pane.id)
+            .collect();
+        peers.sort_unstable();
+        peers.dedup();
+
+        if self.statusbar_peers == peers {
+            return false;
+        }
+
+        self.statusbar_peers = peers;
+        true
     }
 
     fn start_project_root_lookup(&mut self, cwd: PathBuf) {
