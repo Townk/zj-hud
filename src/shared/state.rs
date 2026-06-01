@@ -262,14 +262,38 @@ pub fn write_state_to(path: impl AsRef<Path>, state: &SharedState) -> io::Result
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
     let contents = serde_json::to_string(state).map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("serialize state: {err}"),
         )
     })?;
-    fs::write(&tmp, contents)?;
+    // Each writer stages into its own temp file before the atomic rename so
+    // concurrent roles never clobber each other's in-flight write. Uniqueness
+    // is enforced by `create_new` (O_EXCL): a name collision is an error we
+    // retry with a different suffix, never a silent overwrite. `state.writer`
+    // is only a starting hint to avoid contention — correctness does not depend
+    // on it being set or unique, so a future change can't silently reintroduce
+    // the clobber race.
+    let mut suffix = state.writer;
+    let tmp = loop {
+        let candidate = path.with_extension(format!("{suffix}.tmp"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                use io::Write;
+                file.write_all(contents.as_bytes())?;
+                break candidate;
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                suffix = suffix.wrapping_add(1);
+            }
+            Err(err) => return Err(err),
+        }
+    };
     fs::rename(tmp, path)?;
     Ok(())
 }
