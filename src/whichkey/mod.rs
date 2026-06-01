@@ -1488,12 +1488,31 @@ impl WhichKeyPane {
     /// We exclude all which-key panes and any suppressed (hidden) panes.
     fn other_float_present(&self, manifest: &PaneManifest) -> bool {
         let my_id = get_plugin_ids().plugin_id;
+        // We only yield to *our own* sibling float — the search dialog — never to
+        // unrelated floating plugins the user happens to run (e.g. a context-keys
+        // pane). All our roles share one wasm URL, so identify siblings by the URL
+        // of our own pane in the manifest. If we can't resolve it, we err toward
+        // showing (treat nothing as a blocking float) rather than staying hidden.
+        let my_url = manifest
+            .panes
+            .values()
+            .flatten()
+            .find(|p| p.is_plugin && p.id == my_id)
+            .and_then(|p| p.plugin_url.clone());
+        let Some(my_url) = my_url else {
+            return false;
+        };
         self.active_panes(manifest)
             .map(|panes| {
                 panes.iter().any(|p| {
                     p.is_floating
                         && !p.is_suppressed
-                        && !(p.is_plugin && (p.id == my_id || self.which_key_peers.contains(&p.id)))
+                        && p.is_plugin
+                        // Only our own roles count: a foreign floating plugin must
+                        // never suppress us.
+                        && p.plugin_url.as_deref() == Some(my_url.as_str())
+                        && p.id != my_id
+                        && !self.which_key_peers.contains(&p.id)
                         // Ignore *parked* 1x1 floats. The per-tab search dialog
                         // sits parked (floating, not suppressed) until revealed,
                         // so without this it would read as a live "other float"
