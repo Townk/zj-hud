@@ -3,8 +3,8 @@
 //! Implements tab width equalization and scrolling window algorithms for
 //! distributing available terminal columns across visible tab labels.
 
-use crate::config::Config;
-use crate::state::ScrollState;
+use crate::bar::config::Config;
+use crate::bar::state::ScrollState;
 
 /// Cell width of one scroll-indicator tab (" ◂▌" or " ▸▌").
 /// Must match the actual rendered width in render.rs.
@@ -21,7 +21,7 @@ pub struct TabWidth {
 
 pub struct TabLayout {
     pub widths: Vec<usize>,          // width per tab (0 = hidden)
-    pub scroll: Option<ScrollState>, // from crate::state
+    pub scroll: Option<ScrollState>, // from crate::bar::state
 }
 
 // ─── Algorithm 1: equalize_tab_widths (spec §5.4.4) ──────────────────────────

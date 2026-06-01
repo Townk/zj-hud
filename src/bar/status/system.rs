@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 use zellij_tile::prelude::*;
 
-use crate::config::{Config, InfoWidget, Visibility};
-use crate::state::{AppState, WidgetSample};
+use crate::bar::config::{Config, InfoWidget, Visibility};
+use crate::bar::state::{AppState, WidgetSample};
 
 pub const CTX_KEY: &str = "source";
 pub const CTX_GHOSTTY_FULLSCREEN: &str = "ghostty_fullscreen";

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use zellij_tile::prelude::InputMode;
 
-use crate::whichkey::geometry::{Anchor, HAlign, Padding, VAlign, WidthMode};
+use crate::shared::geometry::{Anchor, HAlign, Padding, VAlign, WidthMode};
 use crate::whichkey::labels::{
     format_key_compact, parse_chord, parse_chord_to_key, Group, LabelSpec, Labels, ModeLabels,
 };
@@ -121,7 +121,7 @@ impl Config {
     /// first argument; a container node (`labels`/`groups`) maps to its
     /// children serialized back to KDL (so the existing block parsers apply).
     pub fn from_block(block: &str) -> Self {
-        let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+        let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
             return Config::default();
         };
         let mut map: BTreeMap<String, String> = BTreeMap::new();
@@ -133,7 +133,7 @@ impl Config {
                 node.entries()
                     .iter()
                     .find(|entry| entry.name().is_none())
-                    .map(|entry| crate::config::kdl_value_to_config_string(entry.value()))
+                    .map(|entry| crate::shared::kdl::kdl_value_to_config_string(entry.value()))
                     .unwrap_or_default()
             };
             map.insert(name, value);
@@ -220,10 +220,10 @@ impl Config {
     /// so a partial entry still falls back to the builtin palette.
     pub fn apply_palette(
         &mut self,
-        palette: &std::collections::BTreeMap<String, crate::shared_state::ModePalette>,
+        palette: &std::collections::BTreeMap<String, crate::shared::state::ModePalette>,
     ) {
         for (name, entry) in palette {
-            let Some(mode) = crate::shared_state::str_to_mode(name) else {
+            let Some(mode) = crate::shared::state::str_to_mode(name) else {
                 continue;
             };
             if !entry.icon.is_empty() {
@@ -279,7 +279,7 @@ fn page_key_glyph(chord: &str) -> Option<String> {
 /// entry (rather than silently making it modeless).
 fn parse_labels_block(block: &str) -> Labels {
     let mut out = Labels::new();
-    let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+    let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
         return out;
     };
     for node in doc.nodes() {
@@ -352,7 +352,7 @@ fn parse_modes_block(
     let mut symbols = BTreeMap::new();
     let mut colors = BTreeMap::new();
     let mut labels = ModeLabels::new();
-    let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+    let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
         return (symbols, colors, labels);
     };
     for node in doc.nodes() {
@@ -415,7 +415,7 @@ fn parse_groups_block(block: &str) -> Vec<Group> {
     // fold them to spaces before handing the blob to the parser. No quoted
     // value in a group line ever contains a comma, so this is lossless.
     let normalized = block.replace(',', " ");
-    let Some(doc) = crate::config::parse_config_document(&normalized, &[]) else {
+    let Some(doc) = crate::shared::kdl::parse_config_document(&normalized, &[]) else {
         return out;
     };
     for node in doc.nodes() {

@@ -1,10 +1,16 @@
+//! Left side of the status bar: tab titles, their layout/scroll math
+//! ([`layout`]) and title truncation ([`truncation`]).
+
+pub mod layout;
+pub mod truncation;
+
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::Config;
-use crate::icons;
-use crate::state::AppState;
-use crate::truncation::truncated_text;
+use crate::bar::config::Config;
+use crate::bar::state::AppState;
+use crate::bar::tabs::truncation::truncated_text;
+use crate::shared::icons;
 
 pub struct TabTitle {
     pub index_str: String,

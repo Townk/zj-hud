@@ -1,18 +1,18 @@
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::InputMode;
 
-use crate::click_map::{ClickAction, ClickMap};
-use crate::color::{gradient, Color};
-use crate::config::Config;
-use crate::icons::{LEFT_HALF_BLOCK, SCROLL_LEFT_ARROW, SCROLL_RIGHT_ARROW};
-use crate::layout::{compute_tab_layout, CHEVRON_TAB_WIDTH};
-use crate::segments::{
+use crate::bar::click_map::{ClickAction, ClickMap};
+use crate::bar::config::Config;
+use crate::bar::state::AppState;
+use crate::bar::status::system;
+use crate::bar::status::{
     divider, divider_width, info_widgets_segment, mode_segment, session_segment, time_segment,
     InfoWidgetsResult, Segment,
 };
-use crate::state::AppState;
-use crate::system;
-use crate::tabs::{compose_tab_title, render_tab_title};
+use crate::bar::tabs::layout::{compute_tab_layout, CHEVRON_TAB_WIDTH};
+use crate::bar::tabs::{compose_tab_title, render_tab_title};
+use crate::shared::color::{gradient, Color};
+use crate::shared::icons::{LEFT_HALF_BLOCK, SCROLL_LEFT_ARROW, SCROLL_RIGHT_ARROW};
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
@@ -453,8 +453,8 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::state::AppState;
+    use crate::bar::config::Config;
+    use crate::bar::state::AppState;
 
     #[test]
     fn empty_state_renders() {

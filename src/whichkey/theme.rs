@@ -79,13 +79,13 @@ fn sgr_fg(color: PaletteColor) -> String {
 ///
 /// Accepts `#RGB` / `#RRGGBB` hex and a bare 0–255 integer (256-color index).
 /// Returns `None` for anything it can't make sense of. The hex case is shared
-/// with the bar via [`crate::color::Color`] so both surfaces parse `#RGB`/
+/// with the bar via [`crate::shared::color::Color`] so both surfaces parse `#RGB`/
 /// `#RRGGBB` identically; the truecolor `to_ansi_fg` escape (`\e[38;2;r;g;bm`)
 /// is exactly the foreground form this panel paints with.
 pub fn parse_color(spec: &str) -> Option<String> {
     let spec = spec.trim();
     if spec.starts_with('#') {
-        return crate::color::Color::parse_hex(spec).map(|c| c.to_ansi_fg());
+        return crate::shared::color::Color::parse_hex(spec).map(|c| c.to_ansi_fg());
     }
     if let Ok(n) = spec.parse::<u8>() {
         return Some(format!("\u{1b}[38;5;{n}m"));

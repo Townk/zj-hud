@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use zellij_tile::prelude::*;
 
-use crate::click_map::ClickMap;
+use crate::bar::click_map::ClickMap;
 
 #[derive(Debug, Clone)]
 pub struct CachedValue<T> {

@@ -8,8 +8,11 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use zellij_tile::prelude::InputMode;
 
-use crate::color::Color;
-use crate::icons;
+use crate::shared::color::Color;
+use crate::shared::icons;
+use crate::shared::kdl::{
+    kdl_value_to_config_string, normalize_spaced_equals, parse_config_document,
+};
 
 // ─── Defaults shared across widget/status parsing ─────────────────────────────
 
@@ -437,8 +440,8 @@ impl Config {
     /// palette without its own `modes` block. Colors are resolved to ANSI SGR
     /// foreground sequences (what the panel emits directly). The `Search` style
     /// is mirrored onto `EnterSearch` so both native-search phases match.
-    pub fn mode_palette(&self) -> BTreeMap<String, crate::shared_state::ModePalette> {
-        use crate::shared_state::{mode_name, ModePalette};
+    pub fn mode_palette(&self) -> BTreeMap<String, crate::shared::state::ModePalette> {
+        use crate::shared::state::{mode_name, ModePalette};
         let mut out = BTreeMap::new();
         for (mode, style) in &self.mode_styles {
             let entry = ModePalette {
@@ -564,54 +567,6 @@ fn parse_modes_document(value: &str) -> Option<KdlDocument> {
     parse_config_document(value, &["color", "icon", "label"])
 }
 
-pub(crate) fn parse_config_document(
-    value: &str,
-    child_assignment_keys: &[&str],
-) -> Option<KdlDocument> {
-    value
-        .parse::<KdlDocument>()
-        .ok()
-        .or_else(|| {
-            normalize_child_assignments(value, child_assignment_keys)
-                .parse::<KdlDocument>()
-                .ok()
-        })
-        .or_else(|| normalize_spaced_equals(value).parse::<KdlDocument>().ok())
-        .or_else(|| {
-            normalize_spaced_equals(&normalize_child_assignments(value, child_assignment_keys))
-                .parse::<KdlDocument>()
-                .ok()
-        })
-}
-
-fn normalize_child_assignments(value: &str, keys: &[&str]) -> String {
-    value
-        .lines()
-        .map(|line| {
-            for key in keys {
-                if let Some(normalized) = normalize_child_assignment(line, key) {
-                    return normalized;
-                }
-            }
-            line.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn normalize_child_assignment(line: &str, key: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let leading = &line[..line.len() - trimmed.len()];
-    let rest = trimmed.strip_prefix(key)?;
-
-    if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-
-    let value = rest.trim_start().strip_prefix('=')?.trim_start();
-    Some(format!("{leading}{key} {value}"))
-}
-
 fn document_value(doc: &KdlDocument, key: &str) -> Option<String> {
     doc.get_arg(key).map(kdl_value_to_config_string)
 }
@@ -633,48 +588,6 @@ fn dedup_strings(values: Vec<String>) -> Vec<String> {
         }
         acc
     })
-}
-
-fn normalize_spaced_equals(value: &str) -> String {
-    let mut normalized = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    let mut in_string = false;
-    let mut escaped = false;
-
-    while let Some(ch) = chars.next() {
-        if in_string {
-            normalized.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            normalized.push(ch);
-            continue;
-        }
-
-        if ch == '=' {
-            while normalized.ends_with(char::is_whitespace) {
-                normalized.pop();
-            }
-            normalized.push('=');
-            while matches!(chars.peek(), Some(next) if next.is_whitespace()) {
-                chars.next();
-            }
-            continue;
-        }
-
-        normalized.push(ch);
-    }
-
-    normalized
 }
 
 fn parse_mode_style_update(node: &KdlNode) -> ModeStyleUpdate {
@@ -716,16 +629,6 @@ fn node_string_value<'a>(node: &'a KdlNode, key: &str) -> Option<&'a str> {
 
 fn value_as_str(value: &KdlValue) -> Option<&str> {
     value.as_string()
-}
-
-pub(crate) fn kdl_value_to_config_string(value: &KdlValue) -> String {
-    value
-        .as_string()
-        .map(str::to_string)
-        .or_else(|| value.as_i64().map(|n| n.to_string()))
-        .or_else(|| value.as_f64().map(|n| n.to_string()))
-        .or_else(|| value.as_bool().map(|b| b.to_string()))
-        .unwrap_or_else(|| value.to_string())
 }
 
 // ─── Icon value parser ────────────────────────────────────────────────────────

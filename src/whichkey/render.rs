@@ -10,8 +10,8 @@
 //! `SCROLL`/`PIN` indicators, which we don't want. The frame and chrome are
 //! colored from the palette [`Theme`]; the mode symbol takes the accent.
 
+use crate::shared::geometry::Padding;
 use crate::whichkey::footer::Footer;
-use crate::whichkey::geometry::Padding;
 use crate::whichkey::grid::Layout;
 use crate::whichkey::theme::Theme;
 

@@ -73,8 +73,8 @@ use unicode_width::UnicodeWidthChar;
 use zellij_tile::prelude::actions::{Action, SearchDirection, SearchOption};
 use zellij_tile::prelude::*;
 
-use crate::icons;
-use crate::whichkey::geometry::{place, Anchor, Padding, WidthMode};
+use crate::shared::geometry::{place, Anchor, Padding, WidthMode};
+use crate::shared::icons;
 
 /// Title we give the floating pane via `rename_plugin_pane`, purely cosmetic.
 /// (The status bar now lights its Search indicator from the client mode, not
@@ -123,8 +123,8 @@ impl Default for SearchGeom {
             // Bottom-right, one column from the right edge and one row above the
             // status bar — reproduces the original hardcoded placement.
             anchor: Anchor {
-                v: crate::whichkey::geometry::VAlign::Bottom,
-                h: crate::whichkey::geometry::HAlign::Right,
+                v: crate::shared::geometry::VAlign::Bottom,
+                h: crate::shared::geometry::HAlign::Right,
             },
             margin: Padding {
                 top: 0,
@@ -142,18 +142,18 @@ impl SearchGeom {
     /// default; reuses the which-key anchor/padding parsers for a single syntax.
     fn from_block(block: &str) -> Self {
         let mut geom = SearchGeom::default();
-        let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+        let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
             return geom;
         };
         if let Some(spec) = doc
             .get_arg("anchor")
-            .map(crate::config::kdl_value_to_config_string)
+            .map(crate::shared::kdl::kdl_value_to_config_string)
         {
             geom.anchor = crate::whichkey::config::parse_anchor(&spec);
         }
         if let Some(spec) = doc
             .get_arg("margin")
-            .map(crate::config::kdl_value_to_config_string)
+            .map(crate::shared::kdl::kdl_value_to_config_string)
         {
             geom.margin = crate::whichkey::config::parse_padding(&spec);
         }
@@ -254,19 +254,19 @@ impl SearchKeys {
     /// Missing or unparseable specs keep their default.
     fn from_block(block: &str) -> Self {
         let mut keys = SearchKeys::default();
-        let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+        let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
             return keys;
         };
         if let Some(spec) = doc
             .get_arg("case_key")
-            .map(crate::config::kdl_value_to_config_string)
+            .map(crate::shared::kdl::kdl_value_to_config_string)
             .and_then(|s| KeyChord::parse(&s))
         {
             keys.case = spec;
         }
         if let Some(spec) = doc
             .get_arg("word_key")
-            .map(crate::config::kdl_value_to_config_string)
+            .map(crate::shared::kdl::kdl_value_to_config_string)
             .and_then(|s| KeyChord::parse(&s))
         {
             keys.word = spec;
@@ -612,8 +612,9 @@ impl SearchPane {
     /// Top of the shared mode-trail (the mode `Search` would unwind to), read
     /// fresh from the session state file the bar maintains.
     fn backstack_top(&self) -> Option<InputMode> {
-        let path = crate::shared_state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
-        crate::shared_state::read_state_from(&path)
+        let path =
+            crate::shared::state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
+        crate::shared::state::read_state_from(&path)
             .ok()
             .and_then(|s| s.backstack().last().copied())
     }
@@ -775,15 +776,16 @@ impl SearchPane {
     /// shared file (and broadcasting it) keeps a single cross-role state
     /// contract rather than a dedicated indicator pipe.
     fn set_search_active(&self, active: bool) {
-        let path = crate::shared_state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
+        let path =
+            crate::shared::state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
         if let Some(state) =
-            crate::shared_state::mutate_state_file(&path, get_plugin_ids().plugin_id, |s| {
+            crate::shared::state::mutate_state_file(&path, get_plugin_ids().plugin_id, |s| {
                 s.search_active = active
             })
         {
             if let Ok(payload) = serde_json::to_string(&state) {
                 pipe_message_to_plugin(
-                    MessageToPlugin::new(crate::shared_state::SYNC_PIPE).with_payload(payload),
+                    MessageToPlugin::new(crate::shared::state::SYNC_PIPE).with_payload(payload),
                 );
             }
         }
@@ -1046,8 +1048,9 @@ impl SearchPane {
     /// Refresh placement geometry from the bar's forwarded `search { … }` block
     /// in the shared session state. Falls back to defaults when absent.
     fn load_geom(&mut self) {
-        let path = crate::shared_state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
-        let block = crate::shared_state::read_state_from(&path)
+        let path =
+            crate::shared::state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
+        let block = crate::shared::state::read_state_from(&path)
             .map(|s| s.search_config)
             .unwrap_or_default();
         self.geom = SearchGeom::from_block(&block);
@@ -1391,7 +1394,7 @@ mod tests {
 
     #[test]
     fn search_geom_defaults_reproduce_legacy_placement() {
-        use crate::whichkey::geometry::{HAlign, VAlign};
+        use crate::shared::geometry::{HAlign, VAlign};
         let g = SearchGeom::default();
         assert_eq!(g.width, PANE_WIDTH);
         assert_eq!(g.anchor.v, VAlign::Bottom);
@@ -1404,7 +1407,7 @@ mod tests {
 
     #[test]
     fn search_geom_from_block_parses_and_clamps() {
-        use crate::whichkey::geometry::{HAlign, VAlign};
+        use crate::shared::geometry::{HAlign, VAlign};
         let g = SearchGeom::from_block("anchor \"top+left\"\nwidth 60\nmargin \"2,3,2,3\"");
         assert_eq!(g.anchor.v, VAlign::Top);
         assert_eq!(g.anchor.h, HAlign::Left);

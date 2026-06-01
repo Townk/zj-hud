@@ -1,18 +1,21 @@
-//! Segments module for zj-statusbar.
+//! Right side of the status bar: the status segments themselves and the
+//! [`system`] info refreshers (cwd/title/widgets/timezone) that feed them.
 //!
-//! Provides right-side status segment functions. Each returns a `Segment` with
-//! styled text, cell width, and background color for use by the render module.
+//! Each segment fn returns a `Segment` with styled text, cell width, and
+//! background color for use by the render module.
+
+pub mod system;
 
 use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::InputMode;
 
-use crate::color::{contrast_ratio, Color};
-use crate::config::{
+use crate::bar::config::{
     format_widget_number, resolve_widget_symbol, Config, DateTimeConfig, InfoWidget, MatchValue,
     SystemInfoBlock, WidgetKind,
 };
-use crate::icons;
-use crate::state::{AppState, WidgetSample};
+use crate::bar::state::{AppState, WidgetSample};
+use crate::shared::color::{contrast_ratio, Color};
+use crate::shared::icons;
 
 // ─── Segment ─────────────────────────────────────────────────────────────────
 
@@ -150,7 +153,7 @@ pub fn time_segment(
     // misconfigured user format doesn't crash the plugin.
     let formatted =
         std::panic::catch_unwind(|| now.format(&dt.format).to_string()).unwrap_or_else(|_| {
-            now.format(crate::config::DEFAULT_DATE_TIME_FORMAT)
+            now.format(crate::bar::config::DEFAULT_DATE_TIME_FORMAT)
                 .to_string()
         });
     let text = if dt.symbol.is_empty() {
@@ -193,7 +196,13 @@ fn renderable_widgets<'a>(
     let mut out: Vec<(String, Option<usize>)> = Vec::new();
 
     for widget in &block.widgets {
-        if !crate::system::is_visible(widget.visibility, widget.min_cols, state, config, cols) {
+        if !crate::bar::status::system::is_visible(
+            widget.visibility,
+            widget.min_cols,
+            state,
+            config,
+            cols,
+        ) {
             continue;
         }
         let Some(sample) = state
@@ -296,7 +305,7 @@ pub fn info_widgets_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::bar::config::Config;
 
     #[test]
     fn format_segment_has_leading_space() {
@@ -391,7 +400,7 @@ mod tests {
 
     // ── Info widgets ─────────────────────────────────────────────────────
 
-    fn build_widget(matches: Vec<crate::config::SymbolRule>) -> InfoWidget {
+    fn build_widget(matches: Vec<crate::bar::config::SymbolRule>) -> InfoWidget {
         InfoWidget {
             id: "w".to_string(),
             kind: WidgetKind::Number,
@@ -400,14 +409,14 @@ mod tests {
             default_symbol: "D {value}".to_string(),
             matches,
             on_click: None,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         }
     }
 
     #[test]
     fn render_one_widget_substitutes_value() {
-        let widget = build_widget(vec![crate::config::SymbolRule::Range {
+        let widget = build_widget(vec![crate::bar::config::SymbolRule::Range {
             from: Some(0.0),
             to: Some(100.0),
             glyph: "G {value}%".to_string(),
@@ -448,7 +457,7 @@ mod tests {
             default_symbol: "".to_string(),
             matches: vec![],
             on_click: None,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         };
         assert!(render_one_widget(&widget, &WidgetSample::Error).is_none());
@@ -463,7 +472,7 @@ mod tests {
         let mut state = AppState::default();
         state.widgets.insert(
             "power".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Error),
                 last_updated: None,
                 in_flight: false,
@@ -471,7 +480,7 @@ mod tests {
         );
         state.widgets.insert(
             "battery".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Value("85".to_string())),
                 last_updated: None,
                 in_flight: false,
@@ -479,7 +488,7 @@ mod tests {
         );
         state.widgets.insert(
             "wifi".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Value("1".to_string())),
                 last_updated: None,
                 in_flight: false,
@@ -494,7 +503,7 @@ mod tests {
             default_symbol: "".to_string(),
             matches: vec![],
             on_click: None,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         };
         let battery = InfoWidget {
@@ -503,13 +512,13 @@ mod tests {
             command: "true".to_string(),
             interval: std::time::Duration::ZERO,
             default_symbol: "".to_string(),
-            matches: vec![crate::config::SymbolRule::Range {
+            matches: vec![crate::bar::config::SymbolRule::Range {
                 from: Some(40.0),
                 to: Some(89.0),
                 glyph: "B{value}".to_string(),
             }],
             on_click: None,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         };
         let wifi = InfoWidget {
@@ -518,18 +527,18 @@ mod tests {
             command: "true".to_string(),
             interval: std::time::Duration::ZERO,
             default_symbol: "W".to_string(),
-            matches: vec![crate::config::SymbolRule::Exact {
-                value: crate::config::MatchValue::Number(1.0),
+            matches: vec![crate::bar::config::SymbolRule::Exact {
+                value: crate::bar::config::MatchValue::Number(1.0),
                 glyph: "W1".to_string(),
             }],
             on_click: None,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         };
 
         let block = SystemInfoBlock {
             separator: "  ".to_string(),
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
             widgets: vec![power, battery, wifi],
         };
@@ -567,7 +576,7 @@ mod tests {
         let mut state = AppState::default();
         state.widgets.insert(
             "skip_me".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Empty),
                 last_updated: None,
                 in_flight: false,
@@ -575,7 +584,7 @@ mod tests {
         );
         state.widgets.insert(
             "show_me".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Value("42".to_string())),
                 last_updated: None,
                 in_flight: false,
@@ -590,13 +599,13 @@ mod tests {
             default_symbol: "X{value}".to_string(),
             matches: vec![],
             on_click: None,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         };
 
         let block = SystemInfoBlock {
             separator: "|".to_string(),
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
             widgets: vec![mk("skip_me"), mk("show_me")],
         };
@@ -626,7 +635,7 @@ mod tests {
         let config = Config::default();
         let block = SystemInfoBlock {
             separator: " ".to_string(),
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
             widgets: vec![build_widget(vec![])],
         };
@@ -641,7 +650,7 @@ mod tests {
         // Two widgets with samples, both with on_click handlers.
         state.widgets.insert(
             "a".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Value("1".to_string())),
                 last_updated: None,
                 in_flight: false,
@@ -649,7 +658,7 @@ mod tests {
         );
         state.widgets.insert(
             "b".to_string(),
-            crate::state::WidgetState {
+            crate::bar::state::WidgetState {
                 sample: Some(WidgetSample::Value("2".to_string())),
                 last_updated: None,
                 in_flight: false,
@@ -664,13 +673,13 @@ mod tests {
             default_symbol: "X{value}".to_string(),
             matches: vec![],
             on_click,
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
         };
 
         let block = SystemInfoBlock {
             separator: "|".to_string(),
-            visibility: crate::config::Visibility::Always,
+            visibility: crate::bar::config::Visibility::Always,
             min_cols: None,
             widgets: vec![mk("a", Some(0)), mk("b", Some(1))],
         };

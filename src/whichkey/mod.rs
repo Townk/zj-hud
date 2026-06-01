@@ -35,7 +35,6 @@
 
 pub mod config;
 pub mod footer;
-pub mod geometry;
 pub mod grid;
 pub mod labels;
 pub mod modes;
@@ -48,9 +47,9 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::actions::Action;
 use zellij_tile::prelude::*;
 
-use crate::shared_state::{self, SharedState, SCHEMA_VERSION};
+use crate::shared::geometry::{self, Rect, WidthMode};
+use crate::shared::state::{self as shared_state, SharedState, SCHEMA_VERSION};
 use config::Config;
-use geometry::{Rect, WidthMode};
 use grid::{diagnostics, lay_out, Columns, Layout};
 use labels::merge_keybinds;
 use render::{page_lines, paint, Frame, NO_BINDINGS};
