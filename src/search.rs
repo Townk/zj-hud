@@ -6,42 +6,42 @@
 //! the `EnterSearch` input mode — at which point `activate` reveals it. A
 //! keybind only needs `SwitchToMode "EnterSearch"` (e.g. `Alt+/`, Ghostty's
 //! Cmd+F); we react to the resulting `ModeUpdate`. On activation we immediately
-//! flip the client to `Search` — a keybind mode where our key grab wins, unlike
-//! the `EnterSearch` text-input mode whose raw typing would bypass it. Sitting
-//! in `Search` (not the base mode) also lets a sibling which-key plugin keep
-//! its mode trail, so a cancel can restore the launching mode.
+//! flip the client to **`Normal`** — counter-intuitively the *only* mode in
+//! which `intercept_key_presses` actually delivers keys to us. In
+//! `EnterSearch`/`Search` zellij's native input layer consumes keystrokes
+//! before any plugin grab can see them, so our custom text field would never
+//! receive input there (verified empirically). The status bar still shows a
+//! Search indicator: the search pane pushes it explicitly to the bar role via
+//! the `__zj_statusbar_search` pipe (`set_bar_search_indicator`), since it can
+//! no longer be inferred from the (now `Normal`) client mode.
 //!
 //! ## Key capture
 //!
-//! A focused plugin only receives keystrokes that the *current input mode* does
-//! not already bind — so in Search mode every letter would be swallowed by the
-//! native search keybindings, and the `Alt+/` launch key would re-fire instead
-//! of reaching us. To get a faithful text field regardless of mode we call
-//! [`intercept_key_presses`] on load: while the dialog is open it captures
-//! every key as [`Event::InterceptedKeyPress`], and we release the grab with
-//! [`clear_key_presses_intercepts`] before closing.
+//! We call [`intercept_key_presses`] on `activate`: while the dialog is open it
+//! captures every key as [`Event::InterceptedKeyPress`] (the launch key
+//! included, so `Alt+/` doesn't re-fire), and we release the grab with
+//! [`clear_key_presses_intercepts`] when the search finishes. The grab is set
+//! once and never re-asserted (re-asserting forces the client mode and was a
+//! past source of churn); it persists for the dialog's lifetime.
 //!
 //! ## Origin pane
 //!
-//! We capture the originating terminal's [`PaneId`] from the pane manifest (the
-//! focused non-plugin pane — it stays `is_focused` even while our floating
-//! dialog holds focus) and re-focus it explicitly by id. Native search only
-//! acts on the focused pane, so every search action is sandwiched between a
-//! focus shift to the origin and back to us. On teardown (submit/cancel) we
-//! shift focus to the origin and [`hide_self`]: the instance is persistent, so
+//! We capture the originating terminal's [`PaneId`] from the focused pane at
+//! activation (before we reveal our float). The dialog is then revealed
+//! *pinned and unfocused*, so the origin terminal keeps focus the whole time —
+//! native search acts on the focused pane, so we drive it directly with no
+//! focus bounce. On teardown we [`hide_self`]: the instance is persistent, so
 //! hiding (not closing) returns us to the hidden background state, ready to be
 //! re-revealed by the next `EnterSearch`.
 //!
 //! ## Live search
 //!
-//! Typing runs a *trailing-debounced* (`SEARCH_DEBOUNCE`) live search: we bounce
-//! focus to the origin, push the term, re-apply the options, and bounce back —
-//! all while staying in `Search` mode so the field keeps accepting keys.
-//! Our own focus bounce is shielded from the cancel detection by `suppress_cancel`.
-//! Because zellij's `clear_search` resets all search options on every
-//! `SearchInput`, the case (Alt+C) / whole-word (Alt+B) toggles and the
-//! always-on wrap are re-applied after the needle each time (see
-//! `apply_search_options`).
+//! Typing runs a *trailing-debounced* (`SEARCH_DEBOUNCE`) live search: we push
+//! the term to the (already-focused) origin's native search and re-apply the
+//! options — no focus bounce, no mode change. Because zellij's `clear_search`
+//! resets all search options on every `SearchInput`, the case (Alt+C) /
+//! whole-word (Alt+O) toggles and the always-on wrap are re-applied after the
+//! needle each time (see `apply_search_options`).
 //!
 //! ## Persistence
 //!
@@ -51,9 +51,11 @@
 //!
 //! All buffer/cursor/edit/unicode bookkeeping is delegated to `tui_input`; the
 //! only glue we own is the `KeyWithModifier -> InputRequest` mapping and the
-//! rendering. On <Enter> we hand the term to Zellij's *native* search of the
-//! originating terminal pane (so highlighting and `n`/`N` keep working) and
-//! leave it in `Search` mode; on <Esc> we cancel back to the launching mode.
+//! rendering. On <Enter> we commit the term to Zellij's *native* search and
+//! enter a *navigation phase*: the input field hides but we keep the key grab
+//! and drive `n`/`N` ourselves, so <Esc> can return the client to the launching
+//! mode (`origin_mode`) instead of native `Search` mode's drop to `Normal`. On
+//! <Esc> from the field (before submit) we cancel straight back to that mode.
 
 use std::collections::BTreeMap;
 use unicode_width::UnicodeWidthChar;
@@ -62,24 +64,23 @@ use zellij_tile::prelude::*;
 
 use crate::icons;
 
-/// Best-effort append to a debug log inside the plugin's WASI sandbox (root
-/// must be a Zellij-preopened dir). Debug instrumentation only — gated by the
-/// `debug_log` config key on the search-role plugin.
-fn append_log(path: &str, content: &str) {
-    use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = f.write_all(content.as_bytes());
-    }
-}
-
 /// Title we give the floating pane via `rename_plugin_pane`, purely cosmetic.
 /// (The status bar now lights its Search indicator from the client mode, not
 /// from this pane's presence — see `render::build_right_side`.)
 pub const PANE_TITLE: &str = "Search";
+
+/// Pipe name used to tell the status-bar role(s) whether the search dialog is
+/// open. We keep the *client* mode in `Normal` while the dialog is up (the only
+/// mode in which `intercept_key_presses` delivers keys to us), so the bar can't
+/// infer "search active" from the mode and must be told explicitly.
+pub const SEARCH_INDICATOR_PIPE: &str = "__zj_statusbar_search";
+
+/// Broadcast the search-dialog on/off state to the bar role(s).
+fn set_bar_search_indicator(active: bool) {
+    pipe_message_to_plugin(
+        MessageToPlugin::new(SEARCH_INDICATOR_PIPE).with_payload(if active { "1" } else { "0" }),
+    );
+}
 
 /// Shared (session-agnostic) file holding the last submitted term, read back on
 /// the next launch to pre-fill the field. Not session-scoped: the launching
@@ -152,7 +153,7 @@ enum KeyAct {
     Cancel,
     /// Toggle case-sensitive matching (Alt+C).
     ToggleCase,
-    /// Toggle whole-word matching (Alt+W).
+    /// Toggle whole-word matching (Alt+O — Alt+W is the which-key leader).
     ToggleWord,
 }
 
@@ -168,6 +169,12 @@ pub struct SearchPane {
     /// Whether the dialog is currently shown (we've entered `EnterSearch`).
     /// While `false` we are a hidden background plugin ignoring most events.
     active: bool,
+    /// Post-submit "results navigation" phase. After <Enter> the input field is
+    /// hidden but we KEEP the key-intercept grab (and the client in `Normal`) so
+    /// we can drive `n`/`N` ourselves and, crucially, redirect <Esc> back to
+    /// `origin_mode` (e.g. `Scroll`) instead of letting native `Search` mode
+    /// drop the client to `Normal`.
+    navigating: bool,
     /// The client's current input mode, tracked from `ModeUpdate` so we know
     /// when `EnterSearch` is entered (activate) or left (deactivate).
     mode: InputMode,
@@ -188,16 +195,13 @@ pub struct SearchPane {
     /// The last term we pushed to native search, so the debounced live search
     /// is a no-op when nothing changed.
     last_searched: Option<String>,
-    /// Set while we deliberately bounce focus to the origin for a live search,
-    /// so `check_focus`/`check_visible` don't mistake it for a user cancel.
-    suppress_cancel: bool,
     /// Outstanding debounce timers. Each edit schedules one; the live search
     /// only fires when the count drains to zero, i.e. once typing has paused
     /// for `SEARCH_DEBOUNCE` (a trailing debounce, not a per-key throttle).
     pending_searches: usize,
     /// Case-sensitive matching toggle (Alt+C). Off ⇒ case-insensitive.
     case_sensitive: bool,
-    /// Whole-word matching toggle (Alt+W).
+    /// Whole-word matching toggle (Alt+O).
     whole_word: bool,
     /// Optional debug-log path (from the `debug_log` config key).
     debug_log: Option<String>,
@@ -237,16 +241,18 @@ impl ZellijPlugin for SearchPane {
     fn update(&mut self, event: Event) -> bool {
         match event {
             Event::PermissionRequestResult(_) => true,
-            // The dialog is mode-driven. `EnterSearch` is the *trigger* (the
-            // text-input mode whose raw typing would otherwise bypass our key
-            // grab); on entering it we record where we came from and `activate`,
-            // which immediately flips the client to `Search` — a keybind mode
-            // where our intercept wins and we can host the field. We never
-            // auto-tear-down on a mode change (the only mode changes while we're
-            // up are the ones we drive: our own flip to `Search`, then a
-            // submit/cancel); teardown happens explicitly in submit/close.
+            // The dialog is mode-driven. `EnterSearch` is the *trigger*; on
+            // entering it we record where we came from (`origin_mode`) and
+            // `activate`, which flips the client to `Normal` (the only mode in
+            // which our intercept receives keys). We never auto-tear-down on a
+            // mode change — the only mode changes while we're up are ones we
+            // drive; teardown happens explicitly in submit/close/finish.
             Event::ModeUpdate(info) => {
                 let new = info.mode;
+                self.log(&format!(
+                    "[ModeUpdate] new={new:?} prev={:?} active={}\n",
+                    self.mode, self.active
+                ));
                 if new == InputMode::EnterSearch && !self.active {
                     self.origin_mode = self.mode;
                     self.activate();
@@ -262,16 +268,26 @@ impl ZellijPlugin for SearchPane {
                 if !self.active {
                     return false;
                 }
+                let my_id = get_plugin_ids().plugin_id;
+                let self_focused = manifest
+                    .panes
+                    .values()
+                    .flatten()
+                    .find(|p| p.is_plugin && p.id == my_id)
+                    .map(|p| p.is_focused);
+                self.log(&format!(
+                    "[PaneUpdate] active={} mode={:?} self_focused={self_focused:?} zellij_focus={:?}\n",
+                    self.active,
+                    self.mode,
+                    get_focused_pane_info().ok(),
+                ));
                 self.detect_origin(&manifest);
                 self.anchor(&manifest);
                 self.check_focus(&manifest);
-                // A live search bounces focus to the origin and back; the grab
-                // doesn't survive that bounce. Re-assert it here, once focus has
-                // actually settled (calling it mid-bounce in `live_search` is a
-                // no-op because we aren't focused yet).
-                if !self.closing {
-                    intercept_key_presses();
-                }
+                // NB: we deliberately do NOT re-assert `intercept_key_presses`
+                // here — the single grab from `activate` suffices and persists
+                // (the pinned dialog never bounces focus), and re-asserting
+                // perturbs the client mode unnecessarily.
                 true
             }
             Event::TabUpdate(tabs) => {
@@ -290,8 +306,36 @@ impl ZellijPlugin for SearchPane {
                 }
                 true
             }
-            Event::Key(key) | Event::InterceptedKeyPress(key) if self.active => {
-                self.handle_key(key)
+            Event::Key(key) => {
+                self.log(&format!(
+                    "[Key] active={} mode={:?} zellij_focus={:?} key={key:?}\n",
+                    self.active,
+                    self.mode,
+                    get_focused_pane_info().ok(),
+                ));
+                if self.active {
+                    self.handle_key(key)
+                } else if self.navigating {
+                    self.handle_nav_key(key)
+                } else {
+                    false
+                }
+            }
+            Event::InterceptedKeyPress(key) => {
+                self.log(&format!(
+                    "[InterceptedKeyPress] active={} navigating={} mode={:?} zellij_focus={:?} key={key:?}\n",
+                    self.active,
+                    self.navigating,
+                    self.mode,
+                    get_focused_pane_info().ok(),
+                ));
+                if self.active {
+                    self.handle_key(key)
+                } else if self.navigating {
+                    self.handle_nav_key(key)
+                } else {
+                    false
+                }
             }
             Event::RunCommandResult(exit_code, stdout, _stderr, context)
                 if context.get(CTX_KEY).map(String::as_str) == Some(CTX_PREFILL) =>
@@ -308,31 +352,38 @@ impl ZellijPlugin for SearchPane {
 }
 
 impl SearchPane {
-    /// Append a line to the debug log when `debug_log` is configured.
+    /// Append a line to the debug log when `debug_log` is configured. Written
+    /// host-side via `run_command` (the plugin's WASI sandbox can't reach an
+    /// arbitrary host path) so the file lives at the real configured path.
     fn log(&self, msg: &str) {
         if let Some(path) = &self.debug_log {
-            append_log(path, msg);
+            // `$1` = message, `$2` = path — both argv, never interpolated.
+            run_command(
+                &["sh", "-c", "printf '%s' \"$1\" >> \"$2\"", "sh", msg, path],
+                BTreeMap::new(),
+            );
         }
     }
 
     /// Reveal the dialog and run its per-open setup: reset the field/flags,
-    /// become selectable (so the cursor renders), shape and show our hidden
-    /// background pane (borderless, fixed size, floating + focused), flip the
-    /// client to `Search` mode, grab keystrokes, and kick off the prefill read.
+    /// become selectable (so the cursor renders), shape and reveal our hidden
+    /// background pane (borderless, fixed size, floating, *pinned + unfocused*),
+    /// grab keystrokes, flip the client to `Normal`, raise the bar's Search
+    /// indicator, and kick off the prefill read.
     ///
-    /// We sit in `Search` (not `EnterSearch`) while typing: `EnterSearch` is a
-    /// text-input mode whose raw typing bypasses the key grab, whereas `Search`
-    /// is an ordinary keybind mode where `intercept_key_presses` wins — so the
-    /// field works, the bar reads "search", and which-key's mode trail stays
-    /// intact (it isn't the base mode). On submit we stay in `Search` for
-    /// `n`/`N`; on cancel we return to `origin_mode`.
+    /// We hold the client in `Normal` while typing because it is the only mode
+    /// in which `intercept_key_presses` delivers keys to us — `EnterSearch`/
+    /// `Search` consume them natively first. The bar's Search indicator is
+    /// driven explicitly (see `set_bar_search_indicator`) rather than from the
+    /// client mode. On cancel we return to `origin_mode`; on submit we enter the
+    /// navigation phase (`n`/`N` + <Esc>→`origin_mode`).
     fn activate(&mut self) {
         self.active = true;
+        self.navigating = false;
         self.ready = true;
         self.closing = false;
         self.was_focused = false;
         self.seen_visible = false;
-        self.suppress_cancel = false;
         self.last_searched = None;
         self.pending_searches = 0;
         self.anchored = None;
@@ -356,8 +407,6 @@ impl SearchPane {
         }
 
         let pane = PaneId::Plugin(get_plugin_ids().plugin_id);
-        // Selectable while shown so the real terminal cursor renders in-field.
-        set_selectable(true);
         rename_plugin_pane(get_plugin_ids().plugin_id, PANE_TITLE);
         // Borderless + fixed size + custom background: shape the dialog from the
         // plugin itself. `anchor` repositions it bottom-right on PaneUpdate.
@@ -368,13 +417,52 @@ impl SearchPane {
                 .with_width_fixed(PANE_WIDTH)
                 .with_height_fixed(PANE_HEIGHT),
         )]);
-        // Reveal as a focused floating pane so the cursor renders and our grab
-        // has somewhere to draw; key capture itself comes from the intercept.
-        show_pane_with_id(pane, true, true);
-        // Leave the text-input `EnterSearch` for the keybind `Search` mode so
-        // the intercept (asserted next) actually receives keystrokes.
-        switch_to_input_mode(&InputMode::Search);
+        // Order matters. The pane is a *suppressed* background instance (loaded
+        // via `load_plugins`); `set_selectable`/focus are no-ops until it's
+        // actually materialised in the tab. So:
+        //   1. reveal it (unsuppress + float) WITHOUT focusing — focusing here
+        //      fails with "pane is not selectable" because a freshly-revealed
+        //      plugin pane defaults to non-selectable,
+        //   2. mark it selectable now that it exists in the tab (also lets the
+        //      real terminal cursor render in-field), then
+        //   3. focus it explicitly with the dedicated FocusPluginPane command.
+        // Reveal the dialog *without* focusing it (unsuppress + float, leaving
+        // focus on the origin terminal), mark it selectable, then PIN it.
+        //
+        // This is the crux of the whole feature. A normal floating pane is only
+        // visible while a floating pane holds focus, so keeping the dialog up
+        // used to force us to focus it — but native search only acts on the
+        // *focused* pane, so every keystroke had to bounce focus to the origin
+        // terminal and back, and that bounce kept knocking the client out of
+        // `Search` into `Normal` (and ping-ponged focus). Pinned, the dialog
+        // stays visible on top while the origin terminal keeps focus the whole
+        // time: search runs against it directly (no bounce, no mode churn), and
+        // keys still reach us through the client-global `intercept_key_presses`
+        // grab regardless of focus. The dialog draws its own cursor, so it needs
+        // no real focus to look active.
+        show_pane_with_id(pane, true, false);
+        set_selectable(true);
+        set_floating_pane_pinned(pane, true);
+        // Order is critical: `intercept_key_presses` neutralises the client's
+        // mode bindings (so every key reaches us regardless of focus), which
+        // drops the client to `Normal`. Assert it FIRST, then set `Search` LAST
+        // so the indicator/mode-trail land on `Search`. We do NOT re-assert the
+        // intercept afterwards (see PaneUpdate) — each re-assert would re-drop
+        // the mode to `Normal`. The single grab here persists for the dialog's
+        // lifetime because we never bounce focus.
         intercept_key_presses();
+        // CRUCIAL: hold the client in `Normal`. `intercept_key_presses` only
+        // delivers `InterceptedKeyPress` while the client is in `Normal` — in
+        // `EnterSearch`/`Search` the native input layer consumes the keys first
+        // and our dialog never sees them (proven empirically). So our custom
+        // text field can only work in `Normal`. The bar still shows the Search
+        // indicator: we push it explicitly via `set_bar_search_indicator`
+        // because it can no longer be read from the (now `Normal`) client mode.
+        switch_to_input_mode(&InputMode::Normal);
+        set_bar_search_indicator(true);
+        self.log(
+            "[activate] revealed(unfocused) + pinned + intercept; mode->Normal + bar:search=1\n",
+        );
         self.request_prefill();
     }
 
@@ -451,9 +539,9 @@ impl SearchPane {
     }
 
     /// Search-as-you-type: when the debounce fires and the term changed, push
-    /// it to the origin's native search, then return focus to ourselves. We set
-    /// `suppress_cancel` around the focus bounce so our own focus changes aren't
-    /// read as a user dismissal. Emptying the field clears the highlight.
+    /// it to the origin's native search. The origin already holds focus (our
+    /// dialog is pinned, not focused) so there's no focus bounce and no mode
+    /// change. Emptying the field clears the highlight.
     fn live_search(&mut self) {
         if self.closing || !self.ready {
             return;
@@ -468,13 +556,12 @@ impl SearchPane {
             return;
         };
         self.log(&format!("[live_search] origin={origin:?} term={term:?}\n"));
-        self.suppress_cancel = true;
-        // Drive native search on the origin *without* switching the client mode:
-        // staying in Normal keeps our dialog typable (and the grab intact). The
-        // actions run as the user against the focused origin regardless of mode.
-        focus_pane_with_id(origin, false, false);
-        // Reset the pane's search buffer first; then either search the new term
-        // or, when emptied, search the now-empty buffer to clear the highlight.
+        // Drive native search against the already-focused origin (the dialog is
+        // pinned, not focused). We do NOT touch the client mode here: it stays
+        // `Normal` so our intercept keeps receiving keys. `SearchInput` itself
+        // async-resets the client to `Normal` anyway, which is exactly what we
+        // want now. Reset the buffer first, push the term + options, then run
+        // the `Search` nav so the match is highlighted/jumped to.
         run_action(Action::SearchInput { input: vec![0] }, BTreeMap::new());
         if !term.is_empty() {
             run_action(
@@ -491,36 +578,30 @@ impl SearchPane {
             },
             BTreeMap::new(),
         );
-        // `should_float_if_hidden = true`: focusing the origin hid the floating
-        // layer, so we must ask for it back or our pane stays gone. The grab is
-        // re-asserted from the PaneUpdate handler once focus settles back on us.
-        focus_pane_with_id(PaneId::Plugin(get_plugin_ids().plugin_id), true, false);
+        self.log("[live_search] done (Normal, bar:search=1)\n");
     }
 
-    /// Hand the term to Zellij's native search of the origin pane, then hide.
+    /// Commit the term to native search, then enter the *results-navigation*
+    /// phase rather than handing control back to native `Search` mode.
     ///
-    /// Order matters: we release the key-press grab and re-focus the origin
-    /// first, so the subsequent `SearchInput`/`Search` actions and mode switch
-    /// target it (not us). We re-apply the options after the needle (every
-    /// `SearchInput` resets them), then settle in `Search` mode so `n`/`N` work.
-    /// An empty submit has nothing to commit, so it falls through to `close`
-    /// (returning the client to `origin_mode`). Because we are a persistent
-    /// headless instance we `hide_self` rather than close — the next
-    /// `EnterSearch` re-activates us, pre-filled with the last submitted term.
+    /// We can't use native `Search` mode because its <Esc> drops the client to
+    /// `Normal`, but the user wants <Esc> to return to where they launched from
+    /// (`origin_mode`, e.g. `Scroll`). So we KEEP the key-intercept grab and the
+    /// client in `Normal`, hide the input field, and drive `n`/`N`/<Esc>
+    /// ourselves (see `handle_nav_key`). The bar indicator stays on Search for
+    /// the whole navigation phase. An empty submit has nothing to commit, so it
+    /// falls through to `close`. We are persistent, so we `hide_self` (not
+    /// close); the next `EnterSearch` re-activates us, pre-filled.
     fn submit(&mut self) {
         let term = self.input.value().to_string();
         if term.is_empty() {
             self.close();
             return;
         }
-        self.closing = true;
-        self.active = false;
         self.persist_term(&term);
-        clear_key_presses_intercepts();
-        self.refocus_origin();
-        // Reset the pane's search buffer first (mirrors the native
-        // `SearchInput 0`); otherwise a re-search appends to the previous
-        // term and finds nothing.
+        // The origin already holds focus (dialog is pinned), so the committed
+        // search targets it directly. Reset the buffer first so a re-search
+        // doesn't append to the previous term.
         run_action(Action::SearchInput { input: vec![0] }, BTreeMap::new());
         run_action(
             Action::SearchInput {
@@ -528,8 +609,7 @@ impl SearchPane {
             },
             BTreeMap::new(),
         );
-        // Preserve the case / whole-word / wrap toggles in the committed
-        // search (the SearchInput above reset them to defaults).
+        // Preserve the case / whole-word / wrap toggles (SearchInput reset them).
         self.apply_search_options();
         run_action(
             Action::Search {
@@ -537,13 +617,62 @@ impl SearchPane {
             },
             BTreeMap::new(),
         );
-        // We're already in `Search`; assert it anyway so `n`/`N` work even if
-        // focus bounces nudged the client mode. Then go inert + hidden: dropping
-        // selectable keeps the background instance out of the focus rotation,
-        // and which-key (which yields to our focused float) reclaims the panel.
-        switch_to_input_mode(&InputMode::Search);
+        // Hide the input field but stay live: keep the intercept grab, keep the
+        // client in `Normal`, and keep the Search indicator up. We're now in the
+        // navigation phase (`n`/`N`/<Esc> handled in `handle_nav_key`).
+        self.active = false;
+        self.navigating = true;
+        self.closing = false;
         set_selectable(false);
         hide_self();
+        self.log("[submit] committed; -> navigating (intercept kept, bar:search=1)\n");
+    }
+
+    /// Navigation-phase key handling (post-submit). `n`/Down → next match,
+    /// `N`/`p`/Up → previous match, <Esc>/<Enter> → finish and return the client
+    /// to `origin_mode`. Every other key is swallowed (mirrors native `Search`
+    /// mode's restricted bindings) so stray keys don't leak to the terminal.
+    fn handle_nav_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Esc | BareKey::Enter => {
+                self.finish_navigation();
+                false
+            }
+            BareKey::Char('n') | BareKey::Down => {
+                run_action(
+                    Action::Search {
+                        direction: SearchDirection::Down,
+                    },
+                    BTreeMap::new(),
+                );
+                true
+            }
+            BareKey::Char('N') | BareKey::Char('p') | BareKey::Up => {
+                run_action(
+                    Action::Search {
+                        direction: SearchDirection::Up,
+                    },
+                    BTreeMap::new(),
+                );
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// End the navigation phase: release the grab, clear the Search indicator,
+    /// and restore the launching mode (e.g. `Scroll`). The highlight is left in
+    /// place — the user is simply back in their origin mode.
+    fn finish_navigation(&mut self) {
+        self.navigating = false;
+        clear_key_presses_intercepts();
+        set_bar_search_indicator(false);
+        switch_to_input_mode(&self.origin_mode);
+        set_selectable(false);
+        self.log(&format!(
+            "[finish_navigation] grab cleared; bar:search=0; mode->{:?}\n",
+            self.origin_mode
+        ));
     }
 
     /// Cancel: drop the grab, re-focus the origin, clear the live-search
@@ -567,6 +696,7 @@ impl SearchPane {
                 BTreeMap::new(),
             );
         }
+        set_bar_search_indicator(false);
         switch_to_input_mode(&self.origin_mode);
         set_selectable(false);
         hide_self();
@@ -587,7 +717,7 @@ impl SearchPane {
             .find(|p| p.is_plugin && p.id == my_id);
         match me {
             Some(p) if p.is_focused => self.was_focused = true,
-            Some(_) if self.was_focused && !self.suppress_cancel => self.close(),
+            Some(_) if self.was_focused => self.close(),
             _ => {}
         }
     }
@@ -607,14 +737,7 @@ impl SearchPane {
             .unwrap_or(false);
         if visible {
             self.seen_visible = true;
-            // A live-search bounce briefly focuses the origin (hiding the
-            // floating layer) then refocuses us (showing it again). Seeing the
-            // layer shown is the reliable end-of-bounce signal — clear the
-            // suppression here, *not* in `check_focus` (our pane stays
-            // `is_focused` throughout the bounce, so that would clear too soon
-            // and let the bounce's transient hide read as a cancel).
-            self.suppress_cancel = false;
-        } else if self.seen_visible && !self.suppress_cancel {
+        } else if self.seen_visible {
             self.close();
         }
     }
@@ -896,9 +1019,10 @@ fn decode_key(key: &KeyWithModifier) -> Option<KeyAct> {
         Esc => KeyAct::Cancel,
         Char('c') if ctrl => KeyAct::Cancel,
 
-        // Search-option toggles. (Whole-word is Alt+B since Alt+W is the leader.)
+        // Search-option toggles. Whole-word is Alt+O ("whole-wOrd"); Alt+W can't
+        // be used because it's the which-key leader.
         Char('c') if alt => KeyAct::ToggleCase,
-        Char('b') if alt => KeyAct::ToggleWord,
+        Char('o') if alt => KeyAct::ToggleWord,
 
         // Readline-style chords.
         Char('a') if ctrl => KeyAct::Edit(R::GoToStart),

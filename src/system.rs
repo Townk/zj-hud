@@ -332,8 +332,10 @@ mod tests {
     #[test]
     fn known_ghostty_windowed_state_overrides_column_fallback() {
         std::env::set_var("TERM_PROGRAM", "ghostty");
-        let mut state = AppState::default();
-        state.got_permissions = true;
+        let mut state = AppState {
+            got_permissions: true,
+            ..Default::default()
+        };
         state.ghostty_fullscreen.set(false);
 
         assert!(!should_show_system_segments(&state, 100, 120));
@@ -343,8 +345,10 @@ mod tests {
     #[test]
     fn unknown_ghostty_state_stays_hidden() {
         std::env::set_var("TERM_PROGRAM", "ghostty");
-        let mut state = AppState::default();
-        state.got_permissions = true;
+        let state = AppState {
+            got_permissions: true,
+            ..Default::default()
+        };
 
         assert!(!should_show_system_segments(&state, 100, 120));
         std::env::remove_var("TERM_PROGRAM");

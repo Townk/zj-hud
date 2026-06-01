@@ -25,6 +25,16 @@ use state::AppState;
 
 register_plugin!(Plugin);
 
+/// Host-import stub for non-wasm builds. `zellij-tile` declares
+/// `host_run_plugin_command` as a wasm import resolved by the zellij runtime;
+/// on the host target (i.e. `cargo test`) that symbol is undefined and linking
+/// fails. The unit tests only exercise pure logic and never issue host
+/// commands, so a no-op lets the test binary link. It is compiled out of the
+/// real wasm plugin, which keeps the genuine import.
+#[cfg(not(target_arch = "wasm32"))]
+#[no_mangle]
+pub extern "C" fn host_run_plugin_command() {}
+
 /// The plugin binary serves two roles, selected at load time by the `role`
 /// configuration key:
 ///
@@ -89,6 +99,10 @@ impl ZellijPlugin for Plugin {
 /// `ReadApplicationState`/`ReadPaneContents` are the bar's; `RunActionsAsUser`
 /// (drive native search) and `InterceptInput` (grab keystrokes) are the search
 /// pane's; `RunCommands` and `ChangeApplicationState` are used by both.
+/// `MessageAndLaunchOtherPlugins` is required by `pipe_message_to_plugin` —
+/// used both for the bar's cross-instance state sync and for the search pane to
+/// tell the bar when its dialog is open (the `__zj_statusbar_search` indicator).
+/// Without it those messages are silently dropped by the host.
 pub const PLUGIN_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadApplicationState,
     PermissionType::ChangeApplicationState,
@@ -96,6 +110,7 @@ pub const PLUGIN_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadPaneContents,
     PermissionType::RunActionsAsUser,
     PermissionType::InterceptInput,
+    PermissionType::MessageAndLaunchOtherPlugins,
 ];
 
 /// How often the background timer fires. Kept fast (1 s) because Zellij does
@@ -227,6 +242,18 @@ impl ZellijPlugin for State {
 
 impl State {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        // The search pane toggles this while its dialog is open/closed. The
+        // client mode stays `Normal` throughout (intercept requirement), so the
+        // bar can only learn "search is active" from this message.
+        if pipe_message.name == search::SEARCH_INDICATOR_PIPE {
+            let active = pipe_message.payload.as_deref() == Some("1");
+            if self.app.search_active != active {
+                self.app.search_active = active;
+                self.app.dirty = true;
+            }
+            return self.app.dirty;
+        }
+
         if pipe_message.name != "__zj_statusbar_sync_state" {
             return false;
         }

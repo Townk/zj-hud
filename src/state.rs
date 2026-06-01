@@ -108,6 +108,13 @@ impl WidgetState {
 
 pub struct AppState {
     pub mode: InputMode,
+    /// Set by the floating search pane (via a `__zj_statusbar_search` pipe)
+    /// while its dialog is open. The dialog keeps the *client* in `Normal`
+    /// (the only mode in which `intercept_key_presses` delivers keys to the
+    /// plugin), so we cannot read "search is active" from the client mode and
+    /// must be told explicitly. When set, the bar renders the Search indicator
+    /// regardless of `mode`.
+    pub search_active: bool,
     pub tabs: Vec<TabInfo>,
     pub panes: HashMap<usize, Vec<PaneInfo>>,
     /// Terminal pane IDs we actually care about for `PaneRenderReport` events
@@ -148,6 +155,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             mode: InputMode::Normal,
+            search_active: false,
             tabs: Vec::new(),
             panes: HashMap::new(),
             interesting_panes: HashSet::new(),
