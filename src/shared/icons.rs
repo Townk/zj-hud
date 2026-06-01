@@ -56,7 +56,7 @@ pub fn process_icon(name: &str) -> Option<&'static str> {
         "node" => Some("\u{E24F}"),
         "nvim" => Some("\u{E6AE}"),
         "pacman" | "paru" => Some("\u{F0BAF}"),
-        "pi" | "pi-coding-agent" => Some("\u{03C0}"),
+        "pi" | "pi-coding-agent" => Some("\u{10FB02}"),
         "psql" => Some("\u{E76E}"),
         "ruby" => Some("\u{E739}"),
         "sudo" => Some("\u{F292}"),
