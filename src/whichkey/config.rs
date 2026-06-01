@@ -249,7 +249,7 @@ fn page_key_glyph(chord: &str) -> Option<String> {
 
 /// Parse the `labels { ... }` block. Like the `modes` block, Zellij hands us
 /// the children as a stringified KDL blob (one node per line) and each line is a
-/// KDL node using **named properties**, mirroring `zj-statusbar`'s style:
+/// KDL node using **named properties**, mirroring `zj-hud`'s style:
 ///
 /// ```kdl
 /// labels {
@@ -327,7 +327,7 @@ fn node_prop<'a>(node: &'a kdl::KdlNode, key: &str) -> Option<&'a str> {
 /// Parse the `modes { ... }` block: per-mode `icon`, `color`, and `label`
 /// overrides. Like [`parse_labels_block`], Zellij hands us the children as a
 /// stringified KDL blob (one node per line); each line is a KDL node using
-/// **named properties**, mirroring `zj-statusbar`'s `ModeStyle`:
+/// **named properties**, mirroring `zj-hud`'s `ModeStyle`:
 ///
 /// ```kdl
 /// modes {

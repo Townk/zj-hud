@@ -3,7 +3,7 @@
 //! Plugin panes don't honor bare `\n` (a line feed moves down a row but doesn't
 //! return the carriage — producing a staircase), so we paint with **absolute
 //! CSI positioning** (`ESC[row;colH`, 1-indexed), the same approach the
-//! `zj-statusbar` floating panes use. Each render fully repaints the pane.
+//! `zj-hud` floating panes use. Each render fully repaints the pane.
 //!
 //! We draw our **own** rounded frame (the pane is set borderless) so the title
 //! is just the mode symbol — Zellij's native frame would also stamp its

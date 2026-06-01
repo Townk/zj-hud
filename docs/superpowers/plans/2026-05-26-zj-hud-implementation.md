@@ -1,4 +1,4 @@
-# zj-statusbar Implementation Plan
+# zj-hud Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -50,10 +50,10 @@ config.rs → color.rs, icons.rs
 
 ```toml
 [package]
-name = "zj-statusbar"
+name = "zj-hud"
 version = "0.1.0"
 edition = "2021"
-description = "A Zellij status bar plugin"
+description = "A Zellij HUD plugin with a status bar, which-key panel, and visual search dialog"
 license = "MIT"
 
 [dependencies]
@@ -89,7 +89,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, _rows: usize, _cols: usize) {
-        print!("zj-statusbar");
+        print!("zj-hud");
     }
 }
 ```
@@ -2934,7 +2934,7 @@ Expected: All tests across all modules PASS.
 - [ ] **Step 4: Build release WASM**
 
 Run: `cargo build --target wasm32-wasip1 --release`
-Expected: Produces `target/wasm32-wasip1/release/zj-statusbar.wasm`.
+Expected: Produces `target/wasm32-wasip1/release/zj-hud.wasm`.
 
 - [ ] **Step 5: Commit**
 
@@ -2957,7 +2957,7 @@ This is manual integration testing in a real Zellij session.
 ```kdl
 layout {
     pane size=1 borderless=true {
-        plugin location="file:target/wasm32-wasip1/release/zj-statusbar.wasm" {
+        plugin location="file:target/wasm32-wasip1/release/zj-hud.wasm" {
             fullscreen_min_cols 80
         }
     }

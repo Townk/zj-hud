@@ -1,4 +1,4 @@
-//! Color module for zj-statusbar.
+//! Color module for zj-hud.
 //!
 //! Provides hex parsing, ANSI escape codes, HSL darken/lighten,
 //! WCAG contrast ratio, and Oklab-based gradient generation.

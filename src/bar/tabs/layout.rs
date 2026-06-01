@@ -1,4 +1,4 @@
-//! Layout module for zj-statusbar.
+//! Layout module for zj-hud.
 //!
 //! Implements tab width equalization and scrolling window algorithms for
 //! distributing available terminal columns across visible tab labels.

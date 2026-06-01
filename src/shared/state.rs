@@ -1,4 +1,4 @@
-//! Shared session state for coordinating the per-tab statusbar/which-key
+//! Shared session state for coordinating the per-tab bar/which-key
 //! instances and the floating search pane.
 //!
 //! All roles of the plugin (Bar, Search, WhichKey) read and write a single
@@ -32,7 +32,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// Broadcast pipe name used by every role to push a fresh `SharedState` to all
 /// instances of the plugin URL. The single channel (rather than per-purpose
 /// pipes) keeps the cross-instance contract to one type.
-pub const SYNC_PIPE: &str = "__zj_statusbar_sync_state";
+pub const SYNC_PIPE: &str = "__zj_hud_sync_state";
 
 /// A single mode's display style, published by the Bar so the WhichKey panel
 /// can render glyphs/colors/labels identical to the bar without a duplicate
@@ -208,7 +208,7 @@ pub fn state_path(zellij_pid: u32, session: &str) -> String {
     } else {
         sanitize_path_component(session)
     };
-    format!("/tmp/zj-statusbar-state-{zellij_pid}-{session}.json")
+    format!("/tmp/zj-hud-state-{zellij_pid}-{session}.json")
 }
 
 fn sanitize_path_component(value: &str) -> String {
@@ -354,8 +354,7 @@ mod tests {
 
     #[test]
     fn state_round_trips_through_json() {
-        let dir =
-            std::env::temp_dir().join(format!("zj-statusbar-state-{}.json", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zj-hud-state-{}.json", std::process::id()));
         let state = SharedState {
             generation: 7,
             writer: 42,
@@ -444,8 +443,7 @@ mod tests {
 
     #[test]
     fn mutate_only_bumps_on_change() {
-        let dir =
-            std::env::temp_dir().join(format!("zj-statusbar-mutate-{}.json", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("zj-hud-mutate-{}.json", std::process::id()));
         let path = dir.to_string_lossy().to_string();
         let _ = fs::remove_file(&path);
 

@@ -47,7 +47,7 @@ const CTX_PROJECT_CWD: &str = "project_cwd";
 pub(crate) struct State {
     app: AppState,
     config: Config,
-    statusbar_peers: Vec<u32>,
+    hud_peers: Vec<u32>,
     shared_generation: u64,
     zellij_visible: bool,
     saw_visible_event: bool,
@@ -201,7 +201,7 @@ impl State {
             }
             Event::PaneUpdate(manifest) => {
                 self.detect_my_tab(&manifest);
-                let peers_changed = self.detect_statusbar_peers(&manifest);
+                let peers_changed = self.detect_hud_peers(&manifest);
                 if peers_changed && self.shared_generation > 0 {
                     self.broadcast_shared_state(&self.snapshot_shared_state());
                 }
@@ -621,7 +621,7 @@ impl State {
         }
     }
 
-    fn detect_statusbar_peers(&mut self, manifest: &PaneManifest) -> bool {
+    fn detect_hud_peers(&mut self, manifest: &PaneManifest) -> bool {
         let my_id = get_plugin_ids().plugin_id;
         let mut peers: Vec<u32> = manifest
             .panes
@@ -635,7 +635,7 @@ impl State {
                     && pane
                         .plugin_url
                         .as_deref()
-                        .map(|url| url.contains("zj-statusbar") || url.contains("statusbar"))
+                        .map(|url| url.contains("zj-hud"))
                         .unwrap_or(false)
             })
             .map(|pane| pane.id)
@@ -643,11 +643,11 @@ impl State {
         peers.sort_unstable();
         peers.dedup();
 
-        if self.statusbar_peers == peers {
+        if self.hud_peers == peers {
             return false;
         }
 
-        self.statusbar_peers = peers;
+        self.hud_peers = peers;
         true
     }
 
@@ -667,7 +667,7 @@ impl State {
             "sh".to_string(),
             "-c".to_string(),
             script.to_string(),
-            "zj-statusbar-project-root".to_string(),
+            "zj-hud-project-root".to_string(),
             cwd_str.clone(),
         ];
         args.extend(self.config.project_markers.iter().cloned());

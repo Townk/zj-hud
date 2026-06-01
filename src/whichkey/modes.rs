@@ -72,7 +72,7 @@ pub fn mode_name(mode: InputMode) -> &'static str {
 }
 
 /// NerdFont glyph for a mode, shown as the panel's frame title. Mirrors the
-/// `zj-statusbar` icon set (`icons.rs` / `MODE_STYLES`) so both surfaces agree.
+/// `zj-hud` icon set (`icons.rs` / `MODE_STYLES`) so both surfaces agree.
 /// `Normal` has no dedicated glyph (the panel is never shown in it) and falls
 /// back to the command glyph.
 pub fn mode_icon(mode: InputMode) -> &'static str {
@@ -91,7 +91,7 @@ pub fn mode_icon(mode: InputMode) -> &'static str {
     }
 }
 
-/// Default symbol color for a mode, as a hex string. Mirrors `zj-statusbar`'s
+/// Default symbol color for a mode, as a hex string. Mirrors `zj-hud`'s
 /// `MODE_STYLES` palette so both surfaces tint a given mode the same way. Used
 /// when the user hasn't set a per-mode `color` in the `modes` config block.
 pub fn mode_color(mode: InputMode) -> &'static str {

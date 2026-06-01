@@ -84,9 +84,9 @@ impl ZellijPlugin for Plugin {
     }
 }
 
-/// Permissions requested by **both** plugin roles (bar and search).
+/// Permissions requested by all plugin roles (bar, search, and which-key).
 ///
-/// The two roles share a single wasm URL, and Zellij caches granted
+/// The roles share a single wasm URL, and Zellij caches granted
 /// permissions *per URL*, overwriting the cache with the exact set last
 /// requested. If the roles asked for different sets they'd ping-pong that
 /// cache and re-prompt on every session. Requesting one identical (union) set
@@ -94,7 +94,7 @@ impl ZellijPlugin for Plugin {
 ///
 /// `ReadApplicationState`/`ReadPaneContents` are the bar's; `RunActionsAsUser`
 /// (drive native search) and `InterceptInput` (grab keystrokes) are the search
-/// pane's; `RunCommands` and `ChangeApplicationState` are used by both.
+/// pane's; `RunCommands` and `ChangeApplicationState` are used by multiple roles.
 /// `MessageAndLaunchOtherPlugins` is required by `pipe_message_to_plugin` —
 /// used for the cross-instance `SharedState` broadcast (the bar's mode sync and
 /// the search pane's `search_active` flag both ride this single channel).

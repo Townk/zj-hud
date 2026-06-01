@@ -85,7 +85,7 @@ pub const PANE_TITLE: &str = "Search";
 /// the next launch to pre-fill the field. Not session-scoped: the launching
 /// keybind opens us directly (no bar involvement) so we don't know the session
 /// name, and sharing the last search term across sessions is harmless.
-const SEARCH_FILE: &str = "/tmp/zj-statusbar-search";
+const SEARCH_FILE: &str = "/tmp/zj-hud-search";
 
 /// `RunCommandResult` context tag for the prefill read.
 const CTX_KEY: &str = "ctx";

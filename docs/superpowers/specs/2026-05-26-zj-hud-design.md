@@ -1,4 +1,4 @@
-# zj-statusbar Design Spec
+# zj-hud Design Spec
 
 Port of the WezTerm `statusbar.wezterm` plugin to Zellij's WASI plugin
 architecture. Behavioral source of truth: `docs/specs/reverse-eng-spec.md` and

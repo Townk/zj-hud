@@ -1,13 +1,11 @@
-# zj-statusbar task runner.
+# zj-hud task runner.
 #
 # Run `just --list` to see all recipes.
 
 # URL the user's layout references for the plugin. Must match the
 # `location=` value in ~/.config/zellij/layouts/default.kdl exactly,
-# since Zellij identifies plugin instances by their URL. The path is
-# already a symlink to the cargo build output, so `build` updates it
-# in place — no copy step is needed.
-plugin_url := "file:" + env_var('HOME') + "/.config/zellij/plugins/zj-statusbar.wasm"
+# since Zellij identifies plugin instances by their URL.
+plugin_url := "file:" + env_var('HOME') + "/Projects/apps/zellij/zj-hud/target/wasm32-wasip1/release/zj-hud.wasm"
 
 # Default to the dev loop: build + reload in the running Zellij session.
 default: reload

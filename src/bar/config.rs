@@ -1,4 +1,4 @@
-//! Config module for zj-statusbar.
+//! Config module for zj-hud.
 //!
 //! Parses plugin configuration from Zellij's `BTreeMap<String, String>` into
 //! a typed `Config` struct with sensible defaults.
@@ -198,7 +198,7 @@ pub struct Config {
 /// Conventional install location of the plugin (mirrors the `justfile`).
 fn default_search_plugin_url() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
-    format!("file:{home}/.config/zellij/plugins/zj-statusbar.wasm")
+    format!("file:{home}/.config/zellij/plugins/zj-hud.wasm")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
