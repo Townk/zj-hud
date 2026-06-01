@@ -1,19 +1,24 @@
 //! Floating "visual search" pane.
 //!
 //! This is the *second* role of the plugin binary (see `main.rs`'s `Plugin`
-//! dispatch). It is loaded headless at session start (via `load_plugins` with
-//! `role "search"`) and stays a hidden background pane until the client enters
-//! the `EnterSearch` input mode — at which point `activate` reveals it. A
-//! keybind only needs `SwitchToMode "EnterSearch"` (e.g. `Alt+/`, Ghostty's
+//! dispatch). Like the which-key panel, it is spawned **per-tab** by the layout
+//! (`floating_panes { … role "search" }`) and parked offscreen on startup, so
+//! every tab has its own ready instance. A floating pane belongs to exactly one
+//! tab, so a single shared instance could only ever appear on the tab it was
+//! first revealed on — hence one per tab. Each instance stays parked until the
+//! client enters `EnterSearch`, at which point **only the active tab's
+//! instance** reveals (`activate`) and grabs the keyboard; the others ignore the
+//! mode change. A keybind only needs `SwitchToMode "EnterSearch"` (e.g. `Alt+/`,
+//! Ghostty's
 //! Cmd+F); we react to the resulting `ModeUpdate`. On activation we immediately
 //! flip the client to **`Normal`** — counter-intuitively the *only* mode in
 //! which `intercept_key_presses` actually delivers keys to us. In
 //! `EnterSearch`/`Search` zellij's native input layer consumes keystrokes
 //! before any plugin grab can see them, so our custom text field would never
 //! receive input there (verified empirically). The status bar still shows a
-//! Search indicator: the search pane pushes it explicitly to the bar role via
-//! the `__zj_statusbar_search` pipe (`set_bar_search_indicator`), since it can
-//! no longer be inferred from the (now `Normal`) client mode.
+//! Search indicator: the search pane writes a `search_active` flag into the
+//! shared session state (`set_search_active`) and broadcasts it, since the
+//! indicator can no longer be inferred from the (now `Normal`) client mode.
 //!
 //! ## Key capture
 //!
@@ -30,18 +35,22 @@
 //! activation (before we reveal our float). The dialog is then revealed
 //! *pinned and unfocused*, so the origin terminal keeps focus the whole time —
 //! native search acts on the focused pane, so we drive it directly with no
-//! focus bounce. On teardown we [`hide_self`]: the instance is persistent, so
-//! hiding (not closing) returns us to the hidden background state, ready to be
-//! re-revealed by the next `EnterSearch`.
+//! focus bounce. On teardown we re-park the pane offscreen (a 1x1 float) rather
+//! than suppress it: like which-key, a suppressed pane does not reliably keep
+//! receiving the `ModeUpdate`s this dialog is driven by — and with one instance
+//! per tab that unreliability would mean a tab's dialog silently never opens.
+//! Parking keeps the instance live and ready to be re-revealed by the next
+//! `EnterSearch` on its tab.
 //!
 //! ## Live search
 //!
 //! Typing runs a *trailing-debounced* (`SEARCH_DEBOUNCE`) live search: we push
 //! the term to the (already-focused) origin's native search and re-apply the
 //! options — no focus bounce, no mode change. Because zellij's `clear_search`
-//! resets all search options on every `SearchInput`, the case (Alt+C) /
-//! whole-word (Alt+O) toggles and the always-on wrap are re-applied after the
-//! needle each time (see `apply_search_options`).
+//! resets all search options on every `SearchInput`, the case / whole-word
+//! toggles (configurable `search { case_key; word_key }`, default `Alt+c` /
+//! `Alt+b`) and the always-on wrap are re-applied after the needle each time
+//! (see `apply_search_options`).
 //!
 //! ## Persistence
 //!
@@ -52,10 +61,12 @@
 //! All buffer/cursor/edit/unicode bookkeeping is delegated to `tui_input`; the
 //! only glue we own is the `KeyWithModifier -> InputRequest` mapping and the
 //! rendering. On <Enter> we commit the term to Zellij's *native* search and
-//! enter a *navigation phase*: the input field hides but we keep the key grab
-//! and drive `n`/`N` ourselves, so <Esc> can return the client to the launching
-//! mode (`origin_mode`) instead of native `Search` mode's drop to `Normal`. On
-//! <Esc> from the field (before submit) we cancel straight back to that mode.
+//! hand control to native `Search` mode (releasing our grab, parking the
+//! dialog): native `n`/`N` navigate, <Esc> drops to `Normal`, and a `backspace`
+//! keybind re-enters `EnterSearch` to reopen this dialog (pre-filled). Because
+//! `Search` is a non-resting mode and our float is parked, the which-key panel
+//! reveals there. On <Esc> from the field (before submit) we cancel straight
+//! back to the launching mode (`origin_mode`, e.g. `Scroll`).
 
 use std::collections::BTreeMap;
 use unicode_width::UnicodeWidthChar;
@@ -63,24 +74,12 @@ use zellij_tile::prelude::actions::{Action, SearchDirection, SearchOption};
 use zellij_tile::prelude::*;
 
 use crate::icons;
+use crate::whichkey::geometry::{place, Anchor, Padding, WidthMode};
 
 /// Title we give the floating pane via `rename_plugin_pane`, purely cosmetic.
 /// (The status bar now lights its Search indicator from the client mode, not
 /// from this pane's presence — see `render::build_right_side`.)
 pub const PANE_TITLE: &str = "Search";
-
-/// Pipe name used to tell the status-bar role(s) whether the search dialog is
-/// open. We keep the *client* mode in `Normal` while the dialog is up (the only
-/// mode in which `intercept_key_presses` delivers keys to us), so the bar can't
-/// infer "search active" from the mode and must be told explicitly.
-pub const SEARCH_INDICATOR_PIPE: &str = "__zj_statusbar_search";
-
-/// Broadcast the search-dialog on/off state to the bar role(s).
-fn set_bar_search_indicator(active: bool) {
-    pipe_message_to_plugin(
-        MessageToPlugin::new(SEARCH_INDICATOR_PIPE).with_payload(if active { "1" } else { "0" }),
-    );
-}
 
 /// Shared (session-agnostic) file holding the last submitted term, read back on
 /// the next launch to pre-fill the field. Not session-scoped: the launching
@@ -92,9 +91,190 @@ const SEARCH_FILE: &str = "/tmp/zj-statusbar-search";
 const CTX_KEY: &str = "ctx";
 const CTX_PREFILL: &str = "search_prefill";
 
-/// Dialog geometry and chrome, applied to our own floating pane on setup.
+/// Default dialog geometry and chrome, applied to our own floating pane on
+/// setup. `PANE_WIDTH` is the default width; the live width comes from the
+/// bar-authored `search { … }` block (see [`SearchGeom`]). The height is fixed
+/// (single field row between a top/bottom chrome row) and not configurable.
 const PANE_WIDTH: usize = 40;
 const PANE_HEIGHT: usize = 3;
+/// Columns reserved to the right of the input area (toggles + chrome). The
+/// input's right edge is `width - RIGHT_INSET`; keeping this fixed lets the
+/// dialog scale with the configured width while preserving its layout. Equals
+/// the historical `PANE_WIDTH(40) - INPUT_END_COL(35)`.
+const RIGHT_INSET: usize = 5;
+/// Smallest width that still leaves a usable input area.
+const MIN_WIDTH: usize = 20;
+
+/// Placement geometry for the search dialog, authored once on the bar as a
+/// `search { anchor "…"; width N; margin "t,r,b,l" }` block and forwarded
+/// through the shared state (`SharedState::search_config`). Mirrors the
+/// which-key panel's config-driven geometry. The height is fixed (the dialog is
+/// a single input row); only `anchor`, `width`, and `margin` are configurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchGeom {
+    anchor: Anchor,
+    margin: Padding,
+    width: usize,
+}
+
+impl Default for SearchGeom {
+    fn default() -> Self {
+        Self {
+            // Bottom-right, one column from the right edge and one row above the
+            // status bar — reproduces the original hardcoded placement.
+            anchor: Anchor {
+                v: crate::whichkey::geometry::VAlign::Bottom,
+                h: crate::whichkey::geometry::HAlign::Right,
+            },
+            margin: Padding {
+                top: 0,
+                right: 1,
+                bottom: 1,
+                left: 0,
+            },
+            width: PANE_WIDTH,
+        }
+    }
+}
+
+impl SearchGeom {
+    /// Parse the forwarded `search { … }` block. Unknown/missing keys keep their
+    /// default; reuses the which-key anchor/padding parsers for a single syntax.
+    fn from_block(block: &str) -> Self {
+        let mut geom = SearchGeom::default();
+        let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+            return geom;
+        };
+        if let Some(spec) = doc
+            .get_arg("anchor")
+            .map(crate::config::kdl_value_to_config_string)
+        {
+            geom.anchor = crate::whichkey::config::parse_anchor(&spec);
+        }
+        if let Some(spec) = doc
+            .get_arg("margin")
+            .map(crate::config::kdl_value_to_config_string)
+        {
+            geom.margin = crate::whichkey::config::parse_padding(&spec);
+        }
+        if let Some(w) = doc.get_arg("width").and_then(|v| v.as_i64()) {
+            if w > 0 {
+                geom.width = (w as usize).max(MIN_WIDTH);
+            }
+        }
+        geom
+    }
+
+    /// Column where the input text area ends (0-indexed), derived from the width.
+    fn input_end_col(&self) -> usize {
+        self.width
+            .saturating_sub(RIGHT_INSET)
+            .max(INPUT_COL + TOGGLE_W + 2)
+    }
+}
+
+/// A single modifier+letter chord (e.g. `Alt+b`), used for the dialog's
+/// in-field search-option toggles. Only modifier+letter combos are supported —
+/// enough for the toggles and unambiguous against typed text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyChord {
+    alt: bool,
+    ctrl: bool,
+    key: char,
+}
+
+impl KeyChord {
+    /// Parse a chord spec like `"Alt b"` / `"Ctrl+b"` (Zellij/which-key style:
+    /// space- or `+`-separated, modifiers then a single letter). `Shift` is
+    /// folded into the letter and otherwise ignored. Returns `None` if no
+    /// single-character key token is present.
+    fn parse(spec: &str) -> Option<Self> {
+        let mut alt = false;
+        let mut ctrl = false;
+        let mut key = None;
+        for tok in spec
+            .split(|c: char| c.is_whitespace() || c == '+')
+            .filter(|s| !s.is_empty())
+        {
+            match tok.to_ascii_lowercase().as_str() {
+                "alt" | "opt" | "option" => alt = true,
+                "ctrl" | "control" => ctrl = true,
+                "shift" => {}
+                _ => {
+                    let mut chars = tok.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => key = Some(c.to_ascii_lowercase()),
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        key.map(|key| KeyChord { alt, ctrl, key })
+    }
+
+    /// Whether a received key event matches this chord (letters compared
+    /// case-insensitively; the exact Alt/Ctrl set must match).
+    fn matches(&self, key: &KeyWithModifier) -> bool {
+        let alt = key.key_modifiers.contains(&KeyModifier::Alt);
+        let ctrl = key.key_modifiers.contains(&KeyModifier::Ctrl);
+        alt == self.alt
+            && ctrl == self.ctrl
+            && matches!(key.bare_key, BareKey::Char(c) if c.eq_ignore_ascii_case(&self.key))
+    }
+}
+
+/// The dialog's two configurable search-option toggle chords, authored on the
+/// bar as `search { case_key "…"; word_key "…" }` and forwarded through the
+/// shared state. Defaults: case = `Alt+c`, whole-word = `Alt+b` ("boundaries").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchKeys {
+    case: KeyChord,
+    word: KeyChord,
+}
+
+impl Default for SearchKeys {
+    fn default() -> Self {
+        Self {
+            case: KeyChord {
+                alt: true,
+                ctrl: false,
+                key: 'c',
+            },
+            word: KeyChord {
+                alt: true,
+                ctrl: false,
+                key: 'b',
+            },
+        }
+    }
+}
+
+impl SearchKeys {
+    /// Parse `case_key` / `word_key` from the forwarded `search { … }` block.
+    /// Missing or unparseable specs keep their default.
+    fn from_block(block: &str) -> Self {
+        let mut keys = SearchKeys::default();
+        let Some(doc) = crate::config::parse_config_document(block, &[]) else {
+            return keys;
+        };
+        if let Some(spec) = doc
+            .get_arg("case_key")
+            .map(crate::config::kdl_value_to_config_string)
+            .and_then(|s| KeyChord::parse(&s))
+        {
+            keys.case = spec;
+        }
+        if let Some(spec) = doc
+            .get_arg("word_key")
+            .map(crate::config::kdl_value_to_config_string)
+            .and_then(|s| KeyChord::parse(&s))
+        {
+            keys.word = spec;
+        }
+        keys
+    }
+}
+
 /// Background `#282C41` as RGB. `set_pane_color` isn't honored for plugin panes
 /// here, so we paint every cell with this truecolor escape in `render` instead.
 const BG_RGB: (u8, u8, u8) = (0x28, 0x2C, 0x41);
@@ -137,8 +317,6 @@ const FIELD_ROW: usize = 1;
 const GLYPH_COL: usize = 2;
 /// First column of the input text.
 const INPUT_COL: usize = 5;
-/// Last column the input text may occupy before it scrolls.
-const INPUT_END_COL: usize = 35;
 
 /// Debounce before a keystroke triggers a live (search-as-you-type) search.
 const SEARCH_DEBOUNCE: f64 = 0.2;
@@ -151,10 +329,6 @@ enum KeyAct {
     Submit,
     /// Abandon the search and close.
     Cancel,
-    /// Toggle case-sensitive matching (Alt+C).
-    ToggleCase,
-    /// Toggle whole-word matching (Alt+O — Alt+W is the which-key leader).
-    ToggleWord,
 }
 
 #[derive(Default)]
@@ -168,19 +342,18 @@ pub struct SearchPane {
     ready: bool,
     /// Whether the dialog is currently shown (we've entered `EnterSearch`).
     /// While `false` we are a hidden background plugin ignoring most events.
+    /// Once a search is submitted we hand off to native `Search` mode and are no
+    /// longer `active` — the dialog parks and only re-activates on the next
+    /// `EnterSearch` (e.g. the `backspace`→reopen keybind from `Search` mode).
     active: bool,
-    /// Post-submit "results navigation" phase. After <Enter> the input field is
-    /// hidden but we KEEP the key-intercept grab (and the client in `Normal`) so
-    /// we can drive `n`/`N` ourselves and, crucially, redirect <Esc> back to
-    /// `origin_mode` (e.g. `Scroll`) instead of letting native `Search` mode
-    /// drop the client to `Normal`.
-    navigating: bool,
     /// The client's current input mode, tracked from `ModeUpdate` so we know
     /// when `EnterSearch` is entered (activate) or left (deactivate).
     mode: InputMode,
-    /// The mode we came *from* when `EnterSearch` was entered — where a cancel
-    /// (or empty submit) returns the client, so an interrupted search restores
-    /// the prior mode (e.g. `Scroll`) instead of always dropping to `Normal`.
+    /// Where a cancel (<Esc>, or empty submit) returns the client, captured when
+    /// `EnterSearch` is entered (see [`SearchPane::cancel_target`]). For a fresh
+    /// open it's the launching mode (e.g. `Scroll`); when reopened from native
+    /// `Search` it's the mode behind `Search` (backstack top) or `Normal`, so
+    /// <Esc> exits search instead of looping back into it.
     origin_mode: InputMode,
     /// Last (x, y) we anchored to, to avoid redundant repositioning calls.
     anchored: Option<(usize, usize)>,
@@ -199,12 +372,33 @@ pub struct SearchPane {
     /// only fires when the count drains to zero, i.e. once typing has paused
     /// for `SEARCH_DEBOUNCE` (a trailing debounce, not a per-key throttle).
     pending_searches: usize,
-    /// Case-sensitive matching toggle (Alt+C). Off ⇒ case-insensitive.
+    /// Case-sensitive matching toggle (see `keys.case`). Off ⇒ case-insensitive.
     case_sensitive: bool,
-    /// Whole-word matching toggle (Alt+O).
+    /// Whole-word matching toggle (see `keys.word`).
     whole_word: bool,
     /// Optional debug-log path (from the `debug_log` config key).
     debug_log: Option<String>,
+    /// Session name, tracked from `ModeUpdate` so we can write the shared
+    /// `search_active` flag to the same session-scoped state file the bar reads.
+    session_name: String,
+    /// Placement geometry, refreshed from the bar's forwarded `search { … }`
+    /// block on each activation (see `load_geom`).
+    geom: SearchGeom,
+    /// Configurable in-field toggle chords (case / whole-word), refreshed from
+    /// the same `search { … }` block on each activation (see `load_geom`).
+    keys: SearchKeys,
+    /// Whether permission-gated startup has run (we parked our layout-spawned
+    /// floating pane offscreen). Guards `ensure_parked` against re-running.
+    granted: bool,
+    /// Position of the currently active tab, tracked from `TabUpdate`. Paired
+    /// with [`Self::my_tab`] to decide whether *this* per-tab instance owns the
+    /// next search (only the active tab's instance reveals + grabs the keyboard).
+    active_tab: usize,
+    /// This instance's home tab position, learned from the manifest (the tab
+    /// whose panes contain our own plugin pane). `None` until first seen. We are
+    /// one of several per-tab instances spawned by the layout; like the
+    /// which-key panel, each only acts while its home tab is the active tab.
+    my_tab: Option<usize>,
 }
 
 impl ZellijPlugin for SearchPane {
@@ -228,19 +422,21 @@ impl ZellijPlugin for SearchPane {
             EventType::ModeUpdate,
         ]);
 
-        // Headless and inert while hidden: NOT selectable, so the background
-        // instance never joins the focus rotation (a selectable hidden pane
-        // fights tab/pane focus). We flip to selectable on `activate` (so the
-        // cursor renders in the field) and back off on teardown.
+        // Inert while parked: NOT selectable, so the background instance never
+        // joins the focus rotation (a selectable hidden pane fights tab/pane
+        // focus). We flip to selectable on `activate` (so the cursor renders in
+        // the field) and back off on teardown. The layout spawns us as a small
+        // floating pane; `ensure_parked` (on permission grant) parks it offscreen
+        // so it stays hidden until the client enters `EnterSearch` on our tab.
         set_selectable(false);
-        // We load at session start (via `load_plugins`) and stay a hidden
-        // background pane until the client enters `EnterSearch`; all reveal/
-        // setup work happens in `activate` (see the ModeUpdate handler).
     }
 
     fn update(&mut self, event: Event) -> bool {
         match event {
-            Event::PermissionRequestResult(_) => true,
+            Event::PermissionRequestResult(_) => {
+                self.ensure_parked();
+                true
+            }
             // The dialog is mode-driven. `EnterSearch` is the *trigger*; on
             // entering it we record where we came from (`origin_mode`) and
             // `activate`, which flips the client to `Normal` (the only mode in
@@ -249,12 +445,21 @@ impl ZellijPlugin for SearchPane {
             // drive; teardown happens explicitly in submit/close/finish.
             Event::ModeUpdate(info) => {
                 let new = info.mode;
+                // Track the session name so `set_search_active` writes to the
+                // same session-scoped state file the bar reads.
+                if let Some(name) = info.session_name {
+                    self.session_name = name;
+                }
                 self.log(&format!(
                     "[ModeUpdate] new={new:?} prev={:?} active={}\n",
                     self.mode, self.active
                 ));
-                if new == InputMode::EnterSearch && !self.active {
-                    self.origin_mode = self.mode;
+                // Every per-tab instance receives this client-global mode
+                // change, but only the one on the active tab may reveal and grab
+                // the keyboard — otherwise N instances would fight over the
+                // (session-global) key intercept. The rest just record the mode.
+                if new == InputMode::EnterSearch && !self.active && self.is_on_active_tab() {
+                    self.origin_mode = self.cancel_target();
                     self.activate();
                 }
                 self.mode = new;
@@ -265,6 +470,9 @@ impl ZellijPlugin for SearchPane {
             // the key grab after a live-search focus bounce. Ignored while
             // hidden so the background instance stays inert.
             Event::PaneUpdate(manifest) => {
+                // Learn which tab we live on even while parked — the activation
+                // gate (`is_on_active_tab`) depends on it.
+                self.detect_my_tab(&manifest);
                 if !self.active {
                     return false;
                 }
@@ -291,7 +499,18 @@ impl ZellijPlugin for SearchPane {
                 true
             }
             Event::TabUpdate(tabs) => {
-                if self.active {
+                if let Some(active) = tabs.iter().find(|t| t.active) {
+                    self.active_tab = active.position;
+                }
+                // If the user switched tabs while the dialog was open, our home
+                // tab is no longer active: tear down (release the intercept +
+                // restore the mode) so we don't keep grabbing keys from another
+                // tab's terminal. Otherwise reconcile visibility. (Once a search
+                // is submitted we hand off to native `Search` mode and are no
+                // longer `active`, so tab switches then need no cleanup here.)
+                if self.active && !self.is_on_active_tab() {
+                    self.close();
+                } else if self.active {
                     self.check_visible(&tabs);
                 }
                 false
@@ -315,24 +534,19 @@ impl ZellijPlugin for SearchPane {
                 ));
                 if self.active {
                     self.handle_key(key)
-                } else if self.navigating {
-                    self.handle_nav_key(key)
                 } else {
                     false
                 }
             }
             Event::InterceptedKeyPress(key) => {
                 self.log(&format!(
-                    "[InterceptedKeyPress] active={} navigating={} mode={:?} zellij_focus={:?} key={key:?}\n",
+                    "[InterceptedKeyPress] active={} mode={:?} zellij_focus={:?} key={key:?}\n",
                     self.active,
-                    self.navigating,
                     self.mode,
                     get_focused_pane_info().ok(),
                 ));
                 if self.active {
                     self.handle_key(key)
-                } else if self.navigating {
-                    self.handle_nav_key(key)
                 } else {
                     false
                 }
@@ -365,6 +579,90 @@ impl SearchPane {
         }
     }
 
+    /// This instance's own plugin pane id.
+    fn me(&self) -> PaneId {
+        PaneId::Plugin(get_plugin_ids().plugin_id)
+    }
+
+    /// Whether this per-tab instance lives on the currently active tab. Until a
+    /// `PaneUpdate` has resolved our home tab we answer `false`: better to miss
+    /// one activation than to let a background tab's instance grab the keyboard.
+    fn is_on_active_tab(&self) -> bool {
+        self.my_tab == Some(self.active_tab)
+    }
+
+    /// Where a cancel (<Esc>) should land, captured when the dialog opens.
+    ///
+    /// Normally that's the mode we launched from (e.g. `Normal`, `Scroll`). But
+    /// when we're reopened from native `Search` mode (the `backspace` keybind),
+    /// returning to `Search` would loop the user back into the results they were
+    /// trying to leave. Instead <Esc> must exit search entirely: drop to the
+    /// mode *behind* `Search` — the top of the shared mode-trail (backstack), or
+    /// `Normal` when the trail is empty. The bar freezes the trail across our
+    /// `Normal` excursion, so by the time we're in `Search` the backstack still
+    /// reflects how the user got there.
+    fn cancel_target(&self) -> InputMode {
+        if matches!(self.mode, InputMode::Search | InputMode::EnterSearch) {
+            self.backstack_top().unwrap_or(InputMode::Normal)
+        } else {
+            self.mode
+        }
+    }
+
+    /// Top of the shared mode-trail (the mode `Search` would unwind to), read
+    /// fresh from the session state file the bar maintains.
+    fn backstack_top(&self) -> Option<InputMode> {
+        let path = crate::shared_state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
+        crate::shared_state::read_state_from(&path)
+            .ok()
+            .and_then(|s| s.backstack().last().copied())
+    }
+
+    /// Learn which tab we live on: the tab whose panes contain our own plugin
+    /// pane. `manifest.panes` is keyed by tab position — the same space as
+    /// `active_tab` (from `TabUpdate`) — so the two compare directly.
+    fn detect_my_tab(&mut self, manifest: &PaneManifest) {
+        let my_id = get_plugin_ids().plugin_id;
+        for (tab, panes) in &manifest.panes {
+            if panes.iter().any(|p| p.is_plugin && p.id == my_id) {
+                self.my_tab = Some(*tab);
+                return;
+            }
+        }
+    }
+
+    /// One-time startup (on the permission grant — pane-shaping commands are
+    /// no-ops before it): drop Zellij's frame and park our layout-spawned float
+    /// offscreen so it stays hidden until the first `activate`. Mirrors the
+    /// which-key panel's `ensure_ready`.
+    fn ensure_parked(&mut self) {
+        if self.granted {
+            return;
+        }
+        self.granted = true;
+        set_pane_borderless(self.me(), true);
+        set_selectable(false);
+        show_pane_with_id(self.me(), false, false);
+        self.park();
+    }
+
+    /// Park the pane as a 1x1 float in the far corner: invisible, but still a
+    /// live (non-suppressed) floating pane so it keeps receiving the
+    /// `ModeUpdate`s the dialog is driven by. Used for the idle state and on
+    /// teardown. Clears `anchored` so the next reveal always re-positions.
+    fn park(&mut self) {
+        set_floating_pane_pinned(self.me(), false);
+        self.anchored = None;
+        change_floating_panes_coordinates(vec![(
+            self.me(),
+            FloatingPaneCoordinates::default()
+                .with_x_fixed(9999)
+                .with_y_fixed(9999)
+                .with_width_fixed(1)
+                .with_height_fixed(1),
+        )]);
+    }
+
     /// Reveal the dialog and run its per-open setup: reset the field/flags,
     /// become selectable (so the cursor renders), shape and reveal our hidden
     /// background pane (borderless, fixed size, floating, *pinned + unfocused*),
@@ -374,12 +672,11 @@ impl SearchPane {
     /// We hold the client in `Normal` while typing because it is the only mode
     /// in which `intercept_key_presses` delivers keys to us — `EnterSearch`/
     /// `Search` consume them natively first. The bar's Search indicator is
-    /// driven explicitly (see `set_bar_search_indicator`) rather than from the
-    /// client mode. On cancel we return to `origin_mode`; on submit we enter the
-    /// navigation phase (`n`/`N` + <Esc>→`origin_mode`).
+    /// driven explicitly (see `set_search_active`) rather than from the
+    /// client mode. On cancel (<Esc>) we return to `origin_mode`; on submit
+    /// (<Enter>) we hand off to native `Search` mode (see `submit`).
     fn activate(&mut self) {
         self.active = true;
-        self.navigating = false;
         self.ready = true;
         self.closing = false;
         self.was_focused = false;
@@ -388,6 +685,10 @@ impl SearchPane {
         self.pending_searches = 0;
         self.anchored = None;
         self.input = tui_input::Input::default();
+        // Refresh placement from the bar's forwarded `search { … }` block. Read
+        // here (not via a pipe) since geometry only matters while the dialog is
+        // up; the bar has long since published it by the first search.
+        self.load_geom();
 
         // Capture the origin terminal *now*, before we steal focus: at this
         // point (just entered EnterSearch via a keybind) the focused pane is
@@ -414,7 +715,7 @@ impl SearchPane {
         change_floating_panes_coordinates(vec![(
             pane,
             FloatingPaneCoordinates::default()
-                .with_width_fixed(PANE_WIDTH)
+                .with_width_fixed(self.geom.width)
                 .with_height_fixed(PANE_HEIGHT),
         )]);
         // Order matters. The pane is a *suppressed* background instance (loaded
@@ -456,17 +757,55 @@ impl SearchPane {
         // `EnterSearch`/`Search` the native input layer consumes the keys first
         // and our dialog never sees them (proven empirically). So our custom
         // text field can only work in `Normal`. The bar still shows the Search
-        // indicator: we push it explicitly via `set_bar_search_indicator`
+        // indicator: we write the shared `search_active` flag (`set_search_active`)
         // because it can no longer be read from the (now `Normal`) client mode.
         switch_to_input_mode(&InputMode::Normal);
-        set_bar_search_indicator(true);
+        self.set_search_active(true);
         self.log(
             "[activate] revealed(unfocused) + pinned + intercept; mode->Normal + bar:search=1\n",
         );
         self.request_prefill();
     }
 
+    /// Publish the search-dialog on/off state to the shared session state so the
+    /// visible bar lights its Search indicator. We keep the *client* mode in
+    /// `Normal` while the dialog is up (the only mode in which
+    /// `intercept_key_presses` delivers keys to us), so the bar can't infer
+    /// "search active" from the mode and reads this field instead. Writing the
+    /// shared file (and broadcasting it) keeps a single cross-role state
+    /// contract rather than a dedicated indicator pipe.
+    fn set_search_active(&self, active: bool) {
+        let path = crate::shared_state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
+        if let Some(state) =
+            crate::shared_state::mutate_state_file(&path, get_plugin_ids().plugin_id, |s| {
+                s.search_active = active
+            })
+        {
+            if let Ok(payload) = serde_json::to_string(&state) {
+                pipe_message_to_plugin(
+                    MessageToPlugin::new(crate::shared_state::SYNC_PIPE).with_payload(payload),
+                );
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyWithModifier) -> bool {
+        // Configurable search-option toggles are matched first (they're
+        // modifier chords, so they never collide with the readline/typing keys
+        // decoded below). Toggling forces a re-run with the new option even
+        // though the term itself is unchanged (hence `last_searched = None`).
+        if self.keys.case.matches(&key) {
+            self.case_sensitive = !self.case_sensitive;
+            self.last_searched = None;
+            self.live_search();
+            return true;
+        }
+        if self.keys.word.matches(&key) {
+            self.whole_word = !self.whole_word;
+            self.last_searched = None;
+            self.live_search();
+            return true;
+        }
         match decode_key(&key) {
             Some(KeyAct::Edit(req)) => {
                 self.input.handle(req);
@@ -480,19 +819,6 @@ impl SearchPane {
             Some(KeyAct::Cancel) => {
                 self.close();
                 false
-            }
-            Some(KeyAct::ToggleCase) => {
-                self.case_sensitive = !self.case_sensitive;
-                // Force a re-run with the new option (the term itself is unchanged).
-                self.last_searched = None;
-                self.live_search();
-                true
-            }
-            Some(KeyAct::ToggleWord) => {
-                self.whole_word = !self.whole_word;
-                self.last_searched = None;
-                self.live_search();
-                true
             }
             None => false,
         }
@@ -582,16 +908,19 @@ impl SearchPane {
     }
 
     /// Commit the term to native search, then enter the *results-navigation*
-    /// phase rather than handing control back to native `Search` mode.
+    /// phase by handing control to Zellij's *native* `Search` mode.
     ///
-    /// We can't use native `Search` mode because its <Esc> drops the client to
-    /// `Normal`, but the user wants <Esc> to return to where they launched from
-    /// (`origin_mode`, e.g. `Scroll`). So we KEEP the key-intercept grab and the
-    /// client in `Normal`, hide the input field, and drive `n`/`N`/<Esc>
-    /// ourselves (see `handle_nav_key`). The bar indicator stays on Search for
-    /// the whole navigation phase. An empty submit has nothing to commit, so it
-    /// falls through to `close`. We are persistent, so we `hide_self` (not
-    /// close); the next `EnterSearch` re-activates us, pre-filled.
+    /// On <Enter> we commit the term, release our key grab, park the dialog, and
+    /// switch the client into real `Search` mode. From there native bindings
+    /// drive navigation (`n`/`N`), <Esc> drops to `Normal`, and a `backspace`
+    /// keybind re-enters `EnterSearch` to reopen this dialog (pre-filled). Two
+    /// things fall out for free: the bar shows `Search` from the real client
+    /// mode (no `search_active` flag needed), and the which-key panel reveals,
+    /// since `Search` is a non-resting mode and our dialog float is now parked.
+    ///
+    /// An empty submit has nothing to commit, so it falls through to `close`. We
+    /// are persistent, so on close/reopen we re-park the pane rather than close
+    /// it; the next `EnterSearch` re-activates us, pre-filled.
     fn submit(&mut self) {
         let term = self.input.value().to_string();
         if term.is_empty() {
@@ -617,62 +946,18 @@ impl SearchPane {
             },
             BTreeMap::new(),
         );
-        // Hide the input field but stay live: keep the intercept grab, keep the
-        // client in `Normal`, and keep the Search indicator up. We're now in the
-        // navigation phase (`n`/`N`/<Esc> handled in `handle_nav_key`).
+        // Hand off to native `Search` mode: release the grab and park our pane,
+        // then switch the client into `Search`. We clear `search_active` because
+        // the bar now reads the indicator straight from the real client mode,
+        // and parking the float lets the which-key panel reveal for `Search`.
         self.active = false;
-        self.navigating = true;
         self.closing = false;
-        set_selectable(false);
-        hide_self();
-        self.log("[submit] committed; -> navigating (intercept kept, bar:search=1)\n");
-    }
-
-    /// Navigation-phase key handling (post-submit). `n`/Down → next match,
-    /// `N`/`p`/Up → previous match, <Esc>/<Enter> → finish and return the client
-    /// to `origin_mode`. Every other key is swallowed (mirrors native `Search`
-    /// mode's restricted bindings) so stray keys don't leak to the terminal.
-    fn handle_nav_key(&mut self, key: KeyWithModifier) -> bool {
-        match key.bare_key {
-            BareKey::Esc | BareKey::Enter => {
-                self.finish_navigation();
-                false
-            }
-            BareKey::Char('n') | BareKey::Down => {
-                run_action(
-                    Action::Search {
-                        direction: SearchDirection::Down,
-                    },
-                    BTreeMap::new(),
-                );
-                true
-            }
-            BareKey::Char('N') | BareKey::Char('p') | BareKey::Up => {
-                run_action(
-                    Action::Search {
-                        direction: SearchDirection::Up,
-                    },
-                    BTreeMap::new(),
-                );
-                true
-            }
-            _ => true,
-        }
-    }
-
-    /// End the navigation phase: release the grab, clear the Search indicator,
-    /// and restore the launching mode (e.g. `Scroll`). The highlight is left in
-    /// place — the user is simply back in their origin mode.
-    fn finish_navigation(&mut self) {
-        self.navigating = false;
         clear_key_presses_intercepts();
-        set_bar_search_indicator(false);
-        switch_to_input_mode(&self.origin_mode);
+        self.set_search_active(false);
         set_selectable(false);
-        self.log(&format!(
-            "[finish_navigation] grab cleared; bar:search=0; mode->{:?}\n",
-            self.origin_mode
-        ));
+        self.park();
+        switch_to_input_mode(&InputMode::Search);
+        self.log("[submit] committed; -> native Search mode (grab released)\n");
     }
 
     /// Cancel: drop the grab, re-focus the origin, clear the live-search
@@ -696,10 +981,10 @@ impl SearchPane {
                 BTreeMap::new(),
             );
         }
-        set_bar_search_indicator(false);
+        self.set_search_active(false);
         switch_to_input_mode(&self.origin_mode);
         set_selectable(false);
-        hide_self();
+        self.park();
     }
 
     /// Treat losing focus (e.g. a click on another pane) as a cancel. We only
@@ -758,9 +1043,19 @@ impl SearchPane {
     /// the screen edge and `BOTTOM_GAP` empty rows above the status bar. The
     /// status bar is the bottommost unselectable plugin pane (a UI bar); we
     /// position relative to it so we sit just above it regardless of screen size.
+    /// Refresh placement geometry from the bar's forwarded `search { … }` block
+    /// in the shared session state. Falls back to defaults when absent.
+    fn load_geom(&mut self) {
+        let path = crate::shared_state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
+        let block = crate::shared_state::read_state_from(&path)
+            .map(|s| s.search_config)
+            .unwrap_or_default();
+        self.geom = SearchGeom::from_block(&block);
+        self.keys = SearchKeys::from_block(&block);
+        self.log(&format!("[geom] {:?} keys={:?}\n", self.geom, self.keys));
+    }
+
     fn anchor(&mut self, manifest: &PaneManifest) {
-        const RIGHT_MARGIN: usize = 1;
-        const BOTTOM_GAP: usize = 1;
         let Ok((tab, _focused)) = get_focused_pane_info() else {
             self.log("[anchor] get_focused_pane_info failed\n");
             return;
@@ -777,11 +1072,21 @@ impl SearchPane {
             self.log("[anchor] no status-bar pane found\n");
             return;
         };
+        // Place within the area *above* the status bar: width spans to the bar's
+        // right edge, height is the rows above it. A `bottom` anchor then sits
+        // just above the bar (the original behavior), `top` hugs the screen top.
         let screen_w = status.pane_x + status.pane_columns;
-        let x = screen_w.saturating_sub(PANE_WIDTH + RIGHT_MARGIN);
-        let y = status.pane_y.saturating_sub(PANE_HEIGHT + BOTTOM_GAP);
+        let screen_h = status.pane_y;
+        let rect = place(
+            (screen_w, screen_h),
+            (self.geom.width, PANE_HEIGHT),
+            WidthMode::Fixed(self.geom.width),
+            self.geom.anchor,
+            self.geom.margin,
+        );
+        let (x, y) = (rect.x, rect.y);
         self.log(&format!(
-            "[anchor] tab={tab} status(x={},y={},cols={}) -> x={x} y={y} prev={:?}\n",
+            "[anchor] tab={tab} status(x={},y={},cols={}) screen=({screen_w},{screen_h}) -> x={x} y={y} prev={:?}\n",
             status.pane_x, status.pane_y, status.pane_columns, self.anchored
         ));
         if self.anchored == Some((x, y)) {
@@ -793,8 +1098,8 @@ impl SearchPane {
             FloatingPaneCoordinates::default()
                 .with_x_fixed(x)
                 .with_y_fixed(y)
-                .with_width_fixed(PANE_WIDTH)
-                .with_height_fixed(PANE_HEIGHT),
+                .with_width_fixed(rect.width)
+                .with_height_fixed(rect.height),
         )]);
     }
 
@@ -865,6 +1170,7 @@ impl SearchPane {
     }
 
     fn render_field(&mut self, rows: usize, cols: usize) {
+        let input_end_col = self.geom.input_end_col();
         let (r, g, b) = BG_RGB;
         let bg = format!("\u{1b}[48;2;{r};{g};{b}m");
         let (br, bg_, bb) = SEARCH_RGB;
@@ -899,9 +1205,9 @@ impl SearchPane {
         let (fr, fg2, fb) = INPUT_BG_RGB;
         let box_fg = format!("\u{1b}[38;2;{fr};{fg2};{fb}m");
         // One extra interior column past the text area: a painted empty block.
-        let interior = INPUT_END_COL - INPUT_COL + 2;
+        let interior = input_end_col - INPUT_COL + 2;
         let box_left = INPUT_COL.saturating_sub(1);
-        let box_right = INPUT_END_COL + 2;
+        let box_right = input_end_col + 2;
         let top_csi = FIELD_ROW; // 0-indexed (FIELD_ROW - 1) + 1
         let mid_csi = FIELD_ROW + 1;
         let bot_csi = FIELD_ROW + 2;
@@ -926,7 +1232,7 @@ impl SearchPane {
 
         // The input area is split: text on the left, then `TOGGLE_W` columns at
         // the right end for the option indicators.
-        let area_w = INPUT_END_COL - INPUT_COL + 1;
+        let area_w = input_end_col - INPUT_COL + 1;
         // One extra column past the toggles is left as a gap, shrinking the text
         // field by one so it never butts up against the indicators.
         let field_w = area_w.saturating_sub(TOGGLE_W + 1).max(1);
@@ -996,7 +1302,7 @@ impl SearchPane {
             "\u{1b}[{};{}H{input_bg}{c_fg}{GLYPH_CASE}{reset}{input_bg} {w_fg}{GLYPH_WORD}{reset}",
             FIELD_ROW + 1,
             // Anchored to the right end of the input area, independent of field_w.
-            INPUT_END_COL - TOGGLE_W + 2,
+            input_end_col - TOGGLE_W + 2,
         ));
 
         print!("{out}");
@@ -1018,11 +1324,6 @@ fn decode_key(key: &KeyWithModifier) -> Option<KeyAct> {
         Enter => KeyAct::Submit,
         Esc => KeyAct::Cancel,
         Char('c') if ctrl => KeyAct::Cancel,
-
-        // Search-option toggles. Whole-word is Alt+O ("whole-wOrd"); Alt+W can't
-        // be used because it's the which-key leader.
-        Char('c') if alt => KeyAct::ToggleCase,
-        Char('o') if alt => KeyAct::ToggleWord,
 
         // Readline-style chords.
         Char('a') if ctrl => KeyAct::Edit(R::GoToStart),
@@ -1086,6 +1387,77 @@ mod tests {
             decode_key(&key(BareKey::Char('x'), &[])),
             Some(KeyAct::Edit(tui_input::InputRequest::InsertChar('x')))
         ));
+    }
+
+    #[test]
+    fn search_geom_defaults_reproduce_legacy_placement() {
+        use crate::whichkey::geometry::{HAlign, VAlign};
+        let g = SearchGeom::default();
+        assert_eq!(g.width, PANE_WIDTH);
+        assert_eq!(g.anchor.v, VAlign::Bottom);
+        assert_eq!(g.anchor.h, HAlign::Right);
+        assert_eq!(g.margin.right, 1);
+        assert_eq!(g.margin.bottom, 1);
+        // Historic INPUT_END_COL was 35 at width 40.
+        assert_eq!(g.input_end_col(), 35);
+    }
+
+    #[test]
+    fn search_geom_from_block_parses_and_clamps() {
+        use crate::whichkey::geometry::{HAlign, VAlign};
+        let g = SearchGeom::from_block("anchor \"top+left\"\nwidth 60\nmargin \"2,3,2,3\"");
+        assert_eq!(g.anchor.v, VAlign::Top);
+        assert_eq!(g.anchor.h, HAlign::Left);
+        assert_eq!(g.width, 60);
+        assert_eq!(g.margin.top, 2);
+        assert_eq!(g.margin.left, 3);
+        assert_eq!(g.input_end_col(), 60 - RIGHT_INSET);
+        // Width below the floor is clamped up.
+        assert_eq!(SearchGeom::from_block("width 5").width, MIN_WIDTH);
+        // Empty block yields defaults.
+        assert_eq!(SearchGeom::from_block(""), SearchGeom::default());
+    }
+
+    #[test]
+    fn search_keys_default_to_alt_c_and_alt_b() {
+        let k = SearchKeys::default();
+        assert!(k
+            .case
+            .matches(&key(BareKey::Char('c'), &[KeyModifier::Alt])));
+        assert!(k
+            .word
+            .matches(&key(BareKey::Char('b'), &[KeyModifier::Alt])));
+        // Empty block keeps defaults.
+        assert_eq!(SearchKeys::from_block(""), SearchKeys::default());
+    }
+
+    #[test]
+    fn search_keys_from_block_overrides_chords() {
+        let k = SearchKeys::from_block("case_key \"Ctrl i\"\nword_key \"Alt+w\"");
+        assert!(k
+            .case
+            .matches(&key(BareKey::Char('i'), &[KeyModifier::Ctrl])));
+        assert!(k
+            .word
+            .matches(&key(BareKey::Char('w'), &[KeyModifier::Alt])));
+        // The old default chords no longer match once overridden.
+        assert!(!k
+            .case
+            .matches(&key(BareKey::Char('c'), &[KeyModifier::Alt])));
+    }
+
+    #[test]
+    fn key_chord_parse_and_match_semantics() {
+        let c = KeyChord::parse("Alt b").unwrap();
+        assert_eq!(c, KeyChord::parse("alt+B").unwrap()); // case- and sep-insensitive
+                                                          // Matches Alt+b (any letter case), but not bare b or Ctrl+b.
+        assert!(c.matches(&key(BareKey::Char('b'), &[KeyModifier::Alt])));
+        assert!(c.matches(&key(BareKey::Char('B'), &[KeyModifier::Alt])));
+        assert!(!c.matches(&key(BareKey::Char('b'), &[])));
+        assert!(!c.matches(&key(BareKey::Char('b'), &[KeyModifier::Ctrl])));
+        // Modifier-only or empty specs have no key → None.
+        assert!(KeyChord::parse("Alt").is_none());
+        assert!(KeyChord::parse("").is_none());
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod state;
 mod system;
 mod tabs;
 mod truncation;
+mod whichkey;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -22,6 +23,7 @@ use config::Config;
 use search::SearchPane;
 use shared_state::SharedState;
 use state::AppState;
+use whichkey::WhichKeyPane;
 
 register_plugin!(Plugin);
 
@@ -35,18 +37,21 @@ register_plugin!(Plugin);
 #[no_mangle]
 pub extern "C" fn host_run_plugin_command() {}
 
-/// The plugin binary serves two roles, selected at load time by the `role`
+/// The plugin binary serves three roles, selected at load time by the `role`
 /// configuration key:
 ///
-/// - the status bar (default), and
-/// - a floating "visual search" input pane (`role = "search"`).
+/// - the status bar (default),
+/// - a floating "visual search" input pane (`role = "search"`), and
+/// - a per-tab which-key style keybinding panel (`role = "whichkey"`).
 ///
-/// Both are the same `.wasm`; Zellij keys plugin instances by (url,
-/// configuration), so the differing config makes the search pane a distinct
-/// instance from the bar.
+/// All are the same `.wasm`; Zellij keys plugin instances by (url,
+/// configuration), so the differing config makes each role a distinct instance.
+/// They coordinate through a single session-scoped `SharedState` file plus the
+/// `shared_state::SYNC_PIPE` broadcast.
 enum Plugin {
     Bar(Box<State>),
-    Search(SearchPane),
+    Search(Box<SearchPane>),
+    WhichKey(Box<WhichKeyPane>),
 }
 
 impl Default for Plugin {
@@ -57,12 +62,15 @@ impl Default for Plugin {
 
 impl ZellijPlugin for Plugin {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        if configuration.get("role").map(String::as_str) == Some("search") {
-            *self = Plugin::Search(SearchPane::default());
+        match configuration.get("role").map(String::as_str) {
+            Some("search") => *self = Plugin::Search(Box::default()),
+            Some("whichkey") => *self = Plugin::WhichKey(Box::default()),
+            _ => {}
         }
         match self {
             Plugin::Bar(state) => state.load(configuration),
             Plugin::Search(search) => search.load(configuration),
+            Plugin::WhichKey(which_key) => which_key.load(configuration),
         }
     }
 
@@ -70,6 +78,7 @@ impl ZellijPlugin for Plugin {
         match self {
             Plugin::Bar(state) => state.update(event),
             Plugin::Search(search) => search.update(event),
+            Plugin::WhichKey(which_key) => which_key.update(event),
         }
     }
 
@@ -77,6 +86,7 @@ impl ZellijPlugin for Plugin {
         match self {
             Plugin::Bar(state) => state.pipe(pipe_message),
             Plugin::Search(_) => false,
+            Plugin::WhichKey(which_key) => which_key.pipe(pipe_message),
         }
     }
 
@@ -84,6 +94,7 @@ impl ZellijPlugin for Plugin {
         match self {
             Plugin::Bar(state) => state.render(rows, cols),
             Plugin::Search(search) => search.render(rows, cols),
+            Plugin::WhichKey(which_key) => which_key.render(rows, cols),
         }
     }
 }
@@ -100,8 +111,8 @@ impl ZellijPlugin for Plugin {
 /// (drive native search) and `InterceptInput` (grab keystrokes) are the search
 /// pane's; `RunCommands` and `ChangeApplicationState` are used by both.
 /// `MessageAndLaunchOtherPlugins` is required by `pipe_message_to_plugin` —
-/// used both for the bar's cross-instance state sync and for the search pane to
-/// tell the bar when its dialog is open (the `__zj_statusbar_search` indicator).
+/// used for the cross-instance `SharedState` broadcast (the bar's mode sync and
+/// the search pane's `search_active` flag both ride this single channel).
 /// Without it those messages are silently dropped by the host.
 pub const PLUGIN_PERMISSIONS: &[PermissionType] = &[
     PermissionType::ReadApplicationState,
@@ -146,21 +157,13 @@ struct State {
     my_tab_id: Option<usize>,
     pending_mode: Option<InputMode>,
     pending_mode_started: Option<Instant>,
-}
-
-// ─── Mode serialisation ───────────────────────────────────────────────────────
-
-fn sanitize_path_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    /// Latest `base_mode` reported by `ModeUpdate`; used to maintain the
+    /// shared `backstack` mode-trail (consumed by the WhichKey role).
+    base_mode: Option<InputMode>,
+    /// Most recent full `SharedState` this instance has seen or written. Lets
+    /// the Bar preserve fields it does not own (`search_active`, `suppressed`,
+    /// `page`) when it republishes a mode change.
+    last_shared: SharedState,
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -242,19 +245,7 @@ impl ZellijPlugin for State {
 
 impl State {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        // The search pane toggles this while its dialog is open/closed. The
-        // client mode stays `Normal` throughout (intercept requirement), so the
-        // bar can only learn "search is active" from this message.
-        if pipe_message.name == search::SEARCH_INDICATOR_PIPE {
-            let active = pipe_message.payload.as_deref() == Some("1");
-            if self.app.search_active != active {
-                self.app.search_active = active;
-                self.app.dirty = true;
-            }
-            return self.app.dirty;
-        }
-
-        if pipe_message.name != "__zj_statusbar_sync_state" {
+        if pipe_message.name != shared_state::SYNC_PIPE {
             return false;
         }
 
@@ -282,6 +273,9 @@ impl State {
                 // Update session name first so the file path is correct.
                 if let Some(name) = mode_info.session_name {
                     self.app.session_name = name;
+                }
+                if let Some(base) = mode_info.base_mode {
+                    self.base_mode = Some(base);
                 }
 
                 self.handle_mode_update(mode);
@@ -502,6 +496,19 @@ impl State {
     }
 
     fn handle_mode_update(&mut self, mode: InputMode) {
+        // While the floating search dialog is up it parks the client in `Normal`
+        // to grab keys (and `SearchInput` re-asserts `Normal`); none of that is a
+        // real mode change. Freeze the mode-trail (publish nothing) so the
+        // which-key breadcrumb survives the excursion and is correct once the
+        // user submits into `Search`. The Search role writes `search_active` to
+        // the state file *before* flipping the mode, so this fresh disk read is
+        // race-free — the cached/pipe-synced copy can lag behind the ModeUpdate.
+        // The Search indicator still lights via the synced `search_active` flag.
+        if self.search_dialog_active() {
+            self.pending_mode = None;
+            self.pending_mode_started = None;
+            return;
+        }
         if mode == InputMode::Normal {
             self.pending_mode = None;
             self.pending_mode_started = None;
@@ -541,8 +548,11 @@ impl State {
 
     fn publish_or_sync_mode(&mut self, mode: InputMode) {
         if self.can_publish_shared_state() {
+            // Fall back to the new mode itself as base when none was reported,
+            // matching native behaviour for sessions with the default base.
+            let base_mode = self.base_mode.unwrap_or(InputMode::Normal);
             self.with_active_shared_state(|shared, _| {
-                shared.publish_mode_update(mode, get_plugin_ids().plugin_id)
+                shared.publish_mode_update(mode, base_mode, get_plugin_ids().plugin_id)
             });
         } else {
             self.sync_from_shared_state();
@@ -559,25 +569,24 @@ impl State {
     }
 
     fn shared_state_path(&self) -> String {
-        let session = if self.app.session_name.is_empty() {
-            "unknown".to_string()
-        } else {
-            sanitize_path_component(&self.app.session_name)
-        };
-        format!(
-            "/tmp/zj-statusbar-state-{}-{}.json",
-            get_plugin_ids().zellij_pid,
-            session
-        )
+        shared_state::state_path(get_plugin_ids().zellij_pid, &self.app.session_name)
     }
 
+    /// The most recent full state with this instance's identity stamped on it.
+    /// Built from `last_shared` so fields the Bar doesn't own (`search_active`,
+    /// `suppressed`, `page`) are preserved across re-broadcasts.
     fn snapshot_shared_state(&self) -> SharedState {
-        SharedState {
-            schema_version: shared_state::SCHEMA_VERSION,
-            generation: self.shared_generation,
-            writer: get_plugin_ids().plugin_id,
-            mode: shared_state::mode_name(self.app.mode).to_string(),
-        }
+        let mut snapshot = self.last_shared.clone();
+        snapshot.schema_version = shared_state::SCHEMA_VERSION;
+        snapshot.generation = self.shared_generation;
+        snapshot.writer = get_plugin_ids().plugin_id;
+        // The active Bar owns the palette + which_key block: stamp them on every
+        // publish so the WhichKey panel inherits the bar's configured
+        // glyphs/colors/labels and its display options (authored once).
+        snapshot.palette = self.config.mode_palette();
+        snapshot.which_key_config = self.config.which_key_config.clone();
+        snapshot.search_config = self.config.search_config.clone();
+        snapshot
     }
 
     fn persist_shared_state(&self, state: &SharedState) {
@@ -593,14 +602,22 @@ impl State {
         let Ok(payload) = serde_json::to_string(state) else {
             return;
         };
-        pipe_message_to_plugin(
-            MessageToPlugin::new("__zj_statusbar_sync_state").with_payload(payload),
-        );
+        pipe_message_to_plugin(MessageToPlugin::new(shared_state::SYNC_PIPE).with_payload(payload));
     }
 
     fn sync_from_shared_state(&mut self) -> bool {
         let shared = shared_state::read_state_from(self.shared_state_path()).unwrap_or_default();
         self.apply_shared_state(&shared)
+    }
+
+    /// Freshest `search_active` straight from disk. Used to gate mode-trail
+    /// updates: the Search role writes this flag before flipping the client
+    /// mode, so reading it here (rather than the lagging pipe-synced copy)
+    /// reliably tells us a `Normal`/`Search` ModeUpdate is a dialog excursion.
+    fn search_dialog_active(&self) -> bool {
+        shared_state::read_state_from(self.shared_state_path())
+            .map(|shared| shared.search_active)
+            .unwrap_or(false)
     }
 
     fn apply_shared_state(&mut self, shared: &SharedState) -> bool {
@@ -615,8 +632,16 @@ impl State {
             // not keep a stale non-Normal mode ready to flash on next reveal.
             InputMode::Normal
         };
-        let changed = self.app.mode != mode;
+        let mut changed = self.app.mode != mode;
+        // The search indicator is driven by the shared field (written by the
+        // Search role) rather than a dedicated pipe, so it reflects on whatever
+        // bar instance is visible.
+        if self.app.search_active != shared.search_active {
+            self.app.search_active = shared.search_active;
+            changed = true;
+        }
         self.shared_generation = shared.generation;
+        self.last_shared = shared.clone();
         if changed {
             self.app.mode = mode;
             self.app.dirty = true;
@@ -635,8 +660,15 @@ impl State {
 
         let from_disk = shared_state::read_state_from(self.shared_state_path()).unwrap_or_default();
         self.apply_shared_state(&from_disk);
-        let before = self.snapshot_shared_state();
-        let after = update(before.clone(), self);
+        // Start from the freshest full state we hold so the closure only
+        // rewrites the Bar-owned fields and preserves everyone else's.
+        let before = self.last_shared.clone();
+        let mut after = update(before.clone(), self);
+        // Bar owns the palette + which_key block; keep them stamped (the first
+        // publish populates them for the WhichKey panel to adopt).
+        after.palette = self.config.mode_palette();
+        after.which_key_config = self.config.which_key_config.clone();
+        after.search_config = self.config.search_config.clone();
         let changed = after != before;
         if changed {
             self.persist_shared_state(&after);
@@ -699,6 +731,7 @@ impl State {
                 pane.is_plugin
                     && pane.id != my_id
                     && pane.title != search::PANE_TITLE
+                    && pane.title != whichkey::PANE_TITLE
                     && pane
                         .plugin_url
                         .as_deref()

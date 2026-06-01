@@ -182,6 +182,14 @@ pub struct Config {
     /// `search_plugin_url` config key if you install it elsewhere. Must match
     /// the `location=` your layout uses, or Zellij will load a second copy.
     pub search_plugin_url: String,
+    /// Raw KDL of the `which_key { … }` block, captured verbatim and forwarded
+    /// to the WhichKey panel through the shared state (the bar itself does not
+    /// interpret it). Empty when no block is configured.
+    pub which_key_config: String,
+    /// Raw KDL of the `search { … }` block, captured verbatim and forwarded to
+    /// the Search dialog through the shared state (the bar itself does not
+    /// interpret it). Empty when no block is configured.
+    pub search_config: String,
 }
 
 /// Conventional install location of the plugin (mirrors the `justfile`).
@@ -282,6 +290,8 @@ impl Default for Config {
             status: StatusConfig::default(),
             click_commands: Vec::new(),
             search_plugin_url: default_search_plugin_url(),
+            which_key_config: String::new(),
+            search_config: String::new(),
         }
     }
 }
@@ -327,6 +337,16 @@ impl Config {
 
         if let Some(v) = map.get("default_session_name") {
             cfg.default_session_name = v.clone();
+        }
+
+        // Captured verbatim (Zellij hands nested blocks as a stringified KDL
+        // child blob) and forwarded to the WhichKey panel via the shared state;
+        // the bar never interprets it.
+        if let Some(block) = map.get("which_key") {
+            cfg.which_key_config = block.clone();
+        }
+        if let Some(block) = map.get("search") {
+            cfg.search_config = block.clone();
         }
 
         if let Some(v) = map.get("search_plugin_url") {
@@ -410,6 +430,29 @@ impl Config {
             .iter()
             .find(|(m, _)| *m == mode)
             .map(|(_, style)| style)
+    }
+
+    /// The mode palette (glyph/color/label per mode) the active Bar publishes
+    /// into the shared state, so the WhichKey panel renders an identical
+    /// palette without its own `modes` block. Colors are resolved to ANSI SGR
+    /// foreground sequences (what the panel emits directly). The `Search` style
+    /// is mirrored onto `EnterSearch` so both native-search phases match.
+    pub fn mode_palette(&self) -> BTreeMap<String, crate::shared_state::ModePalette> {
+        use crate::shared_state::{mode_name, ModePalette};
+        let mut out = BTreeMap::new();
+        for (mode, style) in &self.mode_styles {
+            let entry = ModePalette {
+                icon: style.icon.clone(),
+                color: style.color.to_ansi_fg(),
+                label: style.label.clone(),
+            };
+            if *mode == InputMode::Search {
+                out.entry(mode_name(InputMode::EnterSearch).to_string())
+                    .or_insert_with(|| entry.clone());
+            }
+            out.insert(mode_name(*mode).to_string(), entry);
+        }
+        out
     }
 
     fn mode_style_mut(&mut self, mode: InputMode) -> Option<&mut ModeStyle> {
@@ -521,7 +564,10 @@ fn parse_modes_document(value: &str) -> Option<KdlDocument> {
     parse_config_document(value, &["color", "icon", "label"])
 }
 
-fn parse_config_document(value: &str, child_assignment_keys: &[&str]) -> Option<KdlDocument> {
+pub(crate) fn parse_config_document(
+    value: &str,
+    child_assignment_keys: &[&str],
+) -> Option<KdlDocument> {
     value
         .parse::<KdlDocument>()
         .ok()
@@ -672,7 +718,7 @@ fn value_as_str(value: &KdlValue) -> Option<&str> {
     value.as_string()
 }
 
-fn kdl_value_to_config_string(value: &KdlValue) -> String {
+pub(crate) fn kdl_value_to_config_string(value: &KdlValue) -> String {
     value
         .as_string()
         .map(str::to_string)

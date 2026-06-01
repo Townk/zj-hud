@@ -37,11 +37,11 @@ pub fn is_shell(name: &str) -> bool {
 /// Returns a NerdFont icon for a process name, if one is defined.
 pub fn process_icon(name: &str) -> Option<&'static str> {
     match name {
-        "agent" | "cursor-agent" => Some("\u{2B22}"),
+        "agent" | "cursor-agent" => Some("\u{10FB00}"),
         "bash" => Some("\u{E795}"),
         "brew" => Some("\u{F007B}"),
         "cargo" => Some("\u{E7A8}"),
-        "claude" => Some("\u{100076}"),
+        "claude" => Some("\u{10E861}"),
         "curl" => Some("\u{E241}"),
         "docker" | "docker-compose" => Some("\u{E77D}"),
         "fish" => Some("\u{F0BA5}"),
