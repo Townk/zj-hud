@@ -57,6 +57,13 @@ pub(crate) struct State {
     my_tab_id: Option<usize>,
     pending_mode: Option<InputMode>,
     pending_mode_started: Option<Instant>,
+    /// Non-`Normal` modes the user chained through faster than the debounce
+    /// window, awaiting commit. Kept local (not published) so a transient mode
+    /// never reaches the live indicator; folded into the shared `backstack` in
+    /// order only when the chain settles (see [`Self::commit_pending_trail`]).
+    /// A chain that resolves to `Normal` clears this, so tab-switch transients
+    /// (`Alt+w t N`) never flash the bar.
+    pending_trail: Vec<InputMode>,
     /// Latest `base_mode` reported by `ModeUpdate`; used to maintain the
     /// shared `backstack` mode-trail (consumed by the WhichKey role).
     base_mode: Option<InputMode>,
@@ -418,17 +425,24 @@ impl State {
         if mode == InputMode::Normal {
             self.pending_mode = None;
             self.pending_mode_started = None;
+            self.pending_trail.clear();
             self.publish_or_sync_mode(mode);
             return;
         }
 
-        // A *different* non-Normal mode is already pending: the user chained
-        // modes faster than the debounce window (e.g. `l` then `/`). Commit the
-        // pending mode to the trail now so the intermediate step isn't
-        // coalesced away and lost from the breadcrumb, then debounce the newest
-        // mode as usual.
+        // A *different* non-Normal mode supersedes the one still inside the
+        // debounce window: the user chained modes faster than the window (e.g.
+        // `l` then `/`). Stash the superseded mode in the local trail so the
+        // which-key breadcrumb keeps it, but do NOT publish it — publishing
+        // promotes it to the live mode and flashes the bar indicator for a mode
+        // the user only passed through (the `Alt+w t N` tab-switch transient).
+        // The trail is committed in one shot when the chain settles (see
+        // [`Self::commit_pending_trail`]); a chain that resolves to `Normal`
+        // clears it above, so the transient never reaches the screen.
         if matches!(self.pending_mode, Some(pending) if pending != mode) {
-            self.flush_pending_mode_now();
+            if let Some(prev) = self.pending_mode.take() {
+                self.pending_trail.push(prev);
+            }
         }
 
         if self.can_publish_shared_state() {
@@ -440,25 +454,26 @@ impl State {
         }
     }
 
-    /// Publish the currently pending mode immediately (if any), short-circuiting
-    /// its debounce. Used when a newer mode supersedes it so the intermediate
-    /// transition is still recorded in the shared mode-trail rather than being
-    /// coalesced away.
-    fn flush_pending_mode_now(&mut self) {
-        if let Some(mode) = self.pending_mode.take() {
-            self.pending_mode_started = None;
+    /// Publish the stashed transient trail (modes the user chained through
+    /// during the debounce window) in order, building the shared `backstack`.
+    /// Every publish happens inside the single `update()` call that settled the
+    /// chain, so the bar renders only the final mode — the intermediates reach
+    /// the breadcrumb's `backstack` without ever flashing the live indicator.
+    fn commit_pending_trail(&mut self) {
+        for mode in std::mem::take(&mut self.pending_trail) {
             self.publish_or_sync_mode(mode);
         }
     }
 
-    /// Like [`Self::flush_pending_mode_now`] but discards search-entry modes
-    /// (`EnterSearch`/`Search`): those collapse into the search-dialog excursion
-    /// and must not appear in the breadcrumb trail. Used when freezing the trail
-    /// for the dialog so a real pre-search mode (e.g. `Scroll`) is still
-    /// committed while the search entry itself is dropped.
+    /// Commit the stashed trail plus the pending mode for the search-dialog
+    /// excursion, discarding search-entry modes (`EnterSearch`/`Search`): those
+    /// collapse into the dialog rather than belonging in the breadcrumb. Lets a
+    /// real pre-search mode (e.g. `Scroll`) survive into the trail while the
+    /// search entry itself is dropped.
     fn flush_pending_mode_skipping_search(&mut self) {
         let pending = self.pending_mode.take();
         self.pending_mode_started = None;
+        self.commit_pending_trail();
         if let Some(mode) = pending {
             if !matches!(mode, InputMode::EnterSearch | InputMode::Search) {
                 self.publish_or_sync_mode(mode);
@@ -483,6 +498,7 @@ impl State {
 
         self.pending_mode = None;
         self.pending_mode_started = None;
+        self.commit_pending_trail();
         self.publish_or_sync_mode(mode);
         true
     }
@@ -503,6 +519,7 @@ impl State {
     fn clear_local_mode_indicator(&mut self) {
         self.pending_mode = None;
         self.pending_mode_started = None;
+        self.pending_trail.clear();
         if self.app.mode != InputMode::Normal {
             self.app.mode = InputMode::Normal;
             self.app.dirty = true;
