@@ -405,8 +405,14 @@ impl State {
         // race-free — the cached/pipe-synced copy can lag behind the ModeUpdate.
         // The Search indicator still lights via the synced `search_active` flag.
         if self.search_dialog_active() {
-            self.pending_mode = None;
-            self.pending_mode_started = None;
+            // A genuine mode the user passed through on the way into search
+            // (e.g. `Scroll` from `Alt+w l /`) may still be sitting in
+            // `pending_mode`, debounced and not yet published. Commit it to the
+            // trail before freezing so it survives into the breadcrumb once the
+            // user submits into `Search`; drop the search-entry modes
+            // themselves (`EnterSearch`/`Search`), which collapse into the
+            // dialog excursion rather than belonging in the trail.
+            self.flush_pending_mode_skipping_search();
             return;
         }
         if mode == InputMode::Normal {
@@ -416,12 +422,47 @@ impl State {
             return;
         }
 
+        // A *different* non-Normal mode is already pending: the user chained
+        // modes faster than the debounce window (e.g. `l` then `/`). Commit the
+        // pending mode to the trail now so the intermediate step isn't
+        // coalesced away and lost from the breadcrumb, then debounce the newest
+        // mode as usual.
+        if matches!(self.pending_mode, Some(pending) if pending != mode) {
+            self.flush_pending_mode_now();
+        }
+
         if self.can_publish_shared_state() {
             self.pending_mode = Some(mode);
             self.pending_mode_started = Some(Instant::now());
             set_timeout(MODE_INDICATOR_DEBOUNCE.as_secs_f64());
         } else {
             self.sync_from_shared_state();
+        }
+    }
+
+    /// Publish the currently pending mode immediately (if any), short-circuiting
+    /// its debounce. Used when a newer mode supersedes it so the intermediate
+    /// transition is still recorded in the shared mode-trail rather than being
+    /// coalesced away.
+    fn flush_pending_mode_now(&mut self) {
+        if let Some(mode) = self.pending_mode.take() {
+            self.pending_mode_started = None;
+            self.publish_or_sync_mode(mode);
+        }
+    }
+
+    /// Like [`Self::flush_pending_mode_now`] but discards search-entry modes
+    /// (`EnterSearch`/`Search`): those collapse into the search-dialog excursion
+    /// and must not appear in the breadcrumb trail. Used when freezing the trail
+    /// for the dialog so a real pre-search mode (e.g. `Scroll`) is still
+    /// committed while the search entry itself is dropped.
+    fn flush_pending_mode_skipping_search(&mut self) {
+        let pending = self.pending_mode.take();
+        self.pending_mode_started = None;
+        if let Some(mode) = pending {
+            if !matches!(mode, InputMode::EnterSearch | InputMode::Search) {
+                self.publish_or_sync_mode(mode);
+            }
         }
     }
 

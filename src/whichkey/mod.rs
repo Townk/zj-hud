@@ -192,6 +192,16 @@ pub struct WhichKeyPane {
     log_path: Option<String>,
     /// Per-instance lightweight state trace path, derived from `state_log`.
     state_log_path: Option<String>,
+    /// The breadcrumb mode trail this instance last actually painted while
+    /// visible (see [`Self::breadcrumb_modes`]). The title is drawn from
+    /// `mode` (live, from `ModeUpdate`) + `backstack` (adopted from the Bar's
+    /// shared state, which lands a beat later because the Bar debounces its
+    /// publish). Those two arrive on separate events, so the backstack can be
+    /// updated by a shared-state adoption that reports no field-level change
+    /// (e.g. a redundant re-delivery after a silent sync) and would otherwise
+    /// leave the previously painted, now-stale title frozen on screen. We
+    /// compare against this to force a repaint whenever the visible trail drifts.
+    painted_trail: Vec<InputMode>,
 }
 
 impl Default for WhichKeyPane {
@@ -240,6 +250,7 @@ impl Default for WhichKeyPane {
             my_tab_id: None,
             log_path: None,
             state_log_path: None,
+            painted_trail: Vec::new(),
         }
     }
 }
@@ -504,12 +515,21 @@ impl ZellijPlugin for WhichKeyPane {
                             self.cache_shared_state(&shared);
                         }
                         self.apply_visibility();
+                        // The Bar debounces its mode publish, so the corrected
+                        // backstack (e.g. `Scroll` pushed when entering `Search`)
+                        // can arrive a beat after we already painted the title
+                        // from the live `ModeUpdate`. `apply_shared_state` may
+                        // report `changed=false` here (the backstack field was
+                        // already updated by an earlier silent sync), so also
+                        // repaint whenever the visible title has drifted.
+                        let repaint = changed || self.breadcrumb_stale();
                         self.state_log(&format!(
-                            "[pipe:sync:done] changed={} after={}\n",
+                            "[pipe:sync:done] changed={} repaint={} after={}\n",
                             changed,
+                            repaint,
                             self.context()
                         ));
-                        return changed;
+                        return repaint;
                     }
                     Err(err) => {
                         self.state_log(&format!("[pipe:sync:error] invalid payload: {err}\n"))
@@ -567,6 +587,10 @@ impl ZellijPlugin for WhichKeyPane {
         self.calibrate_frame(rows, cols);
         let body = page_lines(&self.layout, self.page);
         let (title, title_w) = self.breadcrumb();
+        // Record the trail we are about to paint so a later shared-state
+        // adoption that doesn't register a field-level change can still detect
+        // that the on-screen title drifted and force a repaint.
+        self.painted_trail = self.breadcrumb_modes();
         let frame = Frame {
             theme: &self.theme,
             title: &title,
@@ -859,6 +883,14 @@ impl WhichKeyPane {
         let mut modes = self.backstack.clone();
         modes.push(self.mode);
         modes
+    }
+
+    /// True when the visible panel's last-painted breadcrumb ([`Self::painted_trail`])
+    /// no longer matches the trail we would draw now. Used to force a repaint
+    /// after a delayed shared-state adoption updates the backstack without the
+    /// adopting call itself reporting a change (see [`Self::painted_trail`]).
+    fn breadcrumb_stale(&self) -> bool {
+        self.visible && self.breadcrumb_modes() != self.painted_trail
     }
 
     /// Colored breadcrumb for the self-drawn frame title: each mode glyph in its
