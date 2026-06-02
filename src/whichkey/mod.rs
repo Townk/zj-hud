@@ -152,6 +152,16 @@ pub struct WhichKeyPane {
     /// it for focus or clutter it (e.g. the visual-search dialog, which sits in
     /// `Search` mode just like our nav panel would).
     other_float: bool,
+    /// Whether the active tab has *any* other floating pane shown — a foreign
+    /// plugin (session-manager, configuration, about, …), a toggled floating
+    /// terminal, or our own search dialog (tracked from `PaneUpdate`). Unlike
+    /// [`Self::other_float`] (which only yields *visibility* to our sibling
+    /// search dialog), this drives the floating-*layer* and focus decisions:
+    /// while another float shares the tab we must never hide/show the shared
+    /// layer (that would drag their pane along) nor pull focus back to our
+    /// origin terminal (that would steal focus from their pane). It keeps
+    /// which-key fully decoupled from any other float.
+    any_other_float: bool,
     /// Latest tab metadata from `TabUpdate`. Used to resolve `PaneManifest`
     /// entries whether Zellij keys them by position (documented) or stable
     /// `tab_id` (observed after some resurrection/reorder paths).
@@ -236,6 +246,7 @@ impl Default for WhichKeyPane {
             theme: Theme::default(),
             borderless: false,
             other_float: false,
+            any_other_float: false,
             tabs: Vec::new(),
             session_name: None,
             which_key_peers: Vec::new(),
@@ -369,6 +380,10 @@ impl ZellijPlugin for WhichKeyPane {
                 // Recompute float-yield (search dialog etc.) so it folds into the
                 // visibility decision below.
                 self.other_float = self.other_float_present(&manifest);
+                // Recompute the broader "any other float shares the tab" signal
+                // that gates the floating-layer + focus actions (so we never
+                // disturb a foreign plugin/dialog/terminal float the user opened).
+                self.any_other_float = self.any_other_float_present(&manifest);
                 // Reconcile against the desired state. With per-tab instances the
                 // trigger is usually `my_tab`/`active_tab` changing (the previous
                 // tab's panel must hide, the new tab's must show); also covers
@@ -423,7 +438,7 @@ impl ZellijPlugin for WhichKeyPane {
                 if self.visible
                     && self_focused
                     && !terminal_focused
-                    && !self.other_float
+                    && !self.any_other_float
                     && origin_in_tab
                 {
                     self.log("[pane] refocus_origin\n");
@@ -629,7 +644,7 @@ impl WhichKeyPane {
 
     fn context(&self) -> String {
         format!(
-            "pid={} session={:?} state_path={} peers={:?} my_tab={:?}/{:?} active={}/{} zvis={} saw_zvis={} visible={} want={} suppress={} other_float={} mode={:?} base={:?} back={:?} gen={}",
+            "pid={} session={:?} state_path={} peers={:?} my_tab={:?}/{:?} active={}/{} zvis={} saw_zvis={} visible={} want={} suppress={} other_float={} any_other_float={} mode={:?} base={:?} back={:?} gen={}",
             get_plugin_ids().plugin_id,
             self.session_name,
             self.shared_state_path(),
@@ -646,6 +661,7 @@ impl WhichKeyPane {
             self.want_visible(),
             self.suppressed,
             self.other_float,
+            self.any_other_float,
             self.mode,
             self.base_mode,
             self.backstack,
@@ -1115,7 +1131,16 @@ impl WhichKeyPane {
             return;
         }
         if !self.want_visible() {
-            self.hide_floating_layers_everywhere("dismissed");
+            if self.any_other_float {
+                // Another floating pane (a plugin/dialog the user opened, a
+                // toggled floating terminal, or the search dialog) shares the
+                // tab's floating layer. Hiding the layer would hide *their*
+                // pane too, so only park our own pane and leave the layer — and
+                // their float — untouched. This keeps which-key decoupled.
+                self.park_which_key_panes("dismissed-other-float");
+            } else {
+                self.hide_floating_layers_everywhere("dismissed");
+            }
         } else if self.suppressed {
             // Manual hide only needs to park which-key itself. Hiding the whole
             // floating layer makes the next manual unhide call ShowFloatingPanes,
@@ -1190,10 +1215,15 @@ impl WhichKeyPane {
             "[visibility:show:finish] pane={me:?} {}\n",
             self.context()
         ));
-        if !self.revealed_once || self.floating_layer_hidden {
+        // Only ever *show* the shared floating layer when we are the sole float.
+        // If another float already shares the tab the layer is necessarily
+        // visible, so toggling it is both redundant and harmful — it could pull
+        // focus onto the layer and away from the user's pane. We just reposition
+        // our own parked pane into view (it's a live float already).
+        if !self.any_other_float && (!self.revealed_once || self.floating_layer_hidden) {
             let _ = show_floating_panes(self.my_tab_id.or(self.active_tab_id));
-            self.floating_layer_hidden = false;
         }
+        self.floating_layer_hidden = false;
         if !self.revealed_once {
             show_pane_with_id(me, true, false);
             self.revealed_once = true;
@@ -1552,6 +1582,35 @@ impl WhichKeyPane {
                         // than its 1x1 parking rect (search reveals at >= 20
                         // cols), so width is the reliable park/shown signal.
                         && p.pane_columns > 1
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Whether *any* other floating pane shares the active tab's floating layer:
+    /// a foreign plugin (session-manager, configuration, about, layout-manager,
+    /// plugin-manager, share, …), a toggled floating terminal, or our own search
+    /// dialog. Unlike [`Self::other_float_present`] — which gates *visibility*
+    /// and intentionally yields only to our sibling search dialog so a foreign
+    /// float can't suppress us — this drives the floating-*layer* and focus
+    /// decisions. While another float is up we must not hide the shared layer
+    /// (that would hide their pane), not re-show it (redundant, and a focus
+    /// hazard), and not pull focus back to our origin terminal (that would steal
+    /// focus from their pane). Parked 1x1 floats (ours, or a dormant search
+    /// dialog) are excluded by the width test.
+    fn any_other_float_present(&self, manifest: &PaneManifest) -> bool {
+        let my_id = get_plugin_ids().plugin_id;
+        self.active_panes(manifest)
+            .map(|panes| {
+                panes.iter().any(|p| {
+                    p.is_floating
+                        && !p.is_suppressed
+                        && p.pane_columns > 1
+                        // Exclude our own which-key panes (this instance and its
+                        // per-tab peers); everything else — foreign plugins,
+                        // floating terminals, the search dialog — counts.
+                        && !(p.is_plugin
+                            && (p.id == my_id || self.which_key_peers.contains(&p.id)))
                 })
             })
             .unwrap_or(false)
