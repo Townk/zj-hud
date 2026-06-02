@@ -71,15 +71,18 @@ impl Labels {
 /// Per-mode display-name overrides (e.g. `Tmux` → `Command`).
 pub type ModeLabels = BTreeMap<InputMode, String>;
 
-/// A set of bindings that should render contiguously, anchored at the group's
-/// smallest member. Optionally scoped to one or more modes; an empty `modes`
+/// A set of bindings that should render contiguously, in the order the user
+/// listed them. The group is anchored — placed among the ungrouped keys — at
+/// its *first* configured member, whose natural sort position decides where the
+/// whole group lands. Optionally scoped to one or more modes; an empty `modes`
 /// is *modeless* (applies in every mode). For the mode being rendered,
 /// mode-scoped groups claim their member chords ahead of modeless ones.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Group {
     /// Modes this group applies in; empty = modeless.
     pub modes: Vec<InputMode>,
-    /// Canonical key chords that render together.
+    /// Canonical key chords that render together, in the configured order; the
+    /// first member also serves as the group's sort anchor.
     pub members: Vec<String>,
 }
 
@@ -198,12 +201,15 @@ pub fn merge_keybinds(
     }
 
     // Resolve which group (if any) each binding joins, keyed by the canonical
-    // chord of its representative (smallest) key. Earlier groups win on overlap.
-    // Scope to the rendered mode: skip groups bound to other modes, and let
-    // mode-scoped groups claim their chords ahead of modeless ones (a chord in
-    // both joins the mode-scoped group). `gi` stays the original index so the
-    // grouping/anchoring below is unaffected by the two-pass insertion order.
-    let mut group_of: BTreeMap<String, usize> = BTreeMap::new();
+    // chord of its representative (smallest) key, to `(group index, position)`
+    // where `position` is the member's index in the group's configured member
+    // list. Earlier groups win on overlap. Scope to the rendered mode: skip
+    // groups bound to other modes, and let mode-scoped groups claim their chords
+    // ahead of modeless ones (a chord in both joins the mode-scoped group). `gi`
+    // stays the original index so the grouping/anchoring below is unaffected by
+    // the two-pass insertion order; `position` drives both intra-group order and
+    // the choice of anchor member.
+    let mut group_of: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut claim = |scoped: bool| {
         for (gi, g) in groups.iter().enumerate() {
             let applies = if scoped {
@@ -212,8 +218,8 @@ pub fn merge_keybinds(
                 g.modes.is_empty()
             };
             if applies {
-                for chord in &g.members {
-                    group_of.entry(chord.clone()).or_insert(gi);
+                for (pos, chord) in g.members.iter().enumerate() {
+                    group_of.entry(chord.clone()).or_insert((gi, pos));
                 }
             }
         }
@@ -223,11 +229,14 @@ pub fn merge_keybinds(
 
     // Materialize each accumulator into a sortable display row. `to_mode` is 0
     // for bindings that enter another mode (they float to the top) and 1
-    // otherwise; `head` is the row's representative (smallest) key.
+    // otherwise; `head` is the row's representative (smallest) key. `group` is
+    // the joined group's index, and `group_pos` the row's position within that
+    // group's configured member list (0 for ungrouped rows — unused there).
     struct Row {
         to_mode: u8,
         head: SortKey,
         group: Option<usize>,
+        group_pos: usize,
         entry: Entry,
     }
     let rows: Vec<Row> = accs
@@ -235,10 +244,11 @@ pub fn merge_keybinds(
         .map(|mut acc| {
             acc.keys.sort_by_key(sort_key);
             let head = acc.keys.first().map(sort_key).unwrap_or_default();
-            let group = acc
+            let (group, group_pos) = acc
                 .keys
                 .first()
-                .and_then(|k| group_of.get(&canonical_key(k)).copied());
+                .and_then(|k| group_of.get(&canonical_key(k)).copied())
+                .map_or((None, 0), |(gi, pos)| (Some(gi), pos));
             let switch = is_to_mode(&acc.actions, base_mode);
             let to_mode = u8::from(!switch);
             let keys = acc.keys.iter().map(format_key).collect();
@@ -246,6 +256,7 @@ pub fn merge_keybinds(
                 to_mode,
                 head,
                 group,
+                group_pos,
                 entry: Entry {
                     keys,
                     label: acc.label,
@@ -258,8 +269,11 @@ pub fn merge_keybinds(
         .collect();
 
     // A display unit is either a lone row or a user-defined group rendered
-    // contiguously. Each unit sorts by its anchor — the `(to_mode, head)` of
-    // its smallest member; a group lays its members out in that same order.
+    // contiguously. A group lays its members out in the order the user listed
+    // them in the config (`group_pos`); the unit then sorts among ungrouped
+    // rows by its anchor — the `(to_mode, head)` of its *first* configured
+    // member (the lowest `group_pos` present), so that member's natural sort
+    // position decides where the whole group lands.
     let mut grouped: BTreeMap<usize, Vec<Row>> = BTreeMap::new();
     let mut units: Vec<((u8, SortKey), Vec<Entry>)> = Vec::new();
     for row in rows {
@@ -269,7 +283,7 @@ pub fn merge_keybinds(
         }
     }
     for (_gi, mut members) in grouped {
-        members.sort_by(|a, b| (a.to_mode, &a.head).cmp(&(b.to_mode, &b.head)));
+        members.sort_by_key(|m| m.group_pos);
         let anchor = (members[0].to_mode, members[0].head.clone());
         let entries = members.into_iter().map(|m| m.entry).collect();
         units.push((anchor, entries));
@@ -648,6 +662,10 @@ fn bare_key_glyph(bare: &BareKey) -> String {
         BareKey::Down => "↓".into(),
         BareKey::Left => "←".into(),
         BareKey::Right => "→".into(),
+        BareKey::Home => "↖".into(),
+        BareKey::End => "↘".into(),
+        BareKey::PageUp => "⇞".into(),
+        BareKey::PageDown => "⇟".into(),
         BareKey::Char(' ') => "\u{F1050}".into(), // 󱁐
         BareKey::Char(c) => c.to_ascii_uppercase().to_string(),
         BareKey::F(n) if (1..=12).contains(n) => {
@@ -944,8 +962,9 @@ mod tests {
     }
 
     #[test]
-    fn groups_render_contiguously_anchored_at_smallest() {
+    fn groups_render_contiguously_anchored_at_first_member() {
         // Natural order would be a, b, c; grouping {a, c} pulls c up next to a.
+        // The first member `a` anchors the group, so it lands at a's position.
         let kb = vec![
             (key('a'), vec![Action::GoToTab { index: 1 }]),
             (key('b'), vec![Action::GoToTab { index: 2 }]),
@@ -967,6 +986,35 @@ mod tests {
         .map(|e| e.keys[0].clone())
         .collect();
         assert_eq!(order, vec!["A", "C", "B"]);
+    }
+
+    #[test]
+    fn group_members_follow_config_order_and_anchor_at_first() {
+        // Natural chord order is a, b, c. The group lists them out of order as
+        // [c, a]: members must render in that configured order (c then a), and
+        // the group anchors at its first member `c` — so it sorts *after* the
+        // lone `b` (b < c), landing the whole group last.
+        let kb = vec![
+            (key('a'), vec![Action::GoToTab { index: 1 }]),
+            (key('b'), vec![Action::GoToTab { index: 2 }]),
+            (key('c'), vec![Action::GoToTab { index: 3 }]),
+        ];
+        let groups = vec![Group {
+            modes: vec![],
+            members: vec!["c".to_string(), "a".to_string()],
+        }];
+        let order: Vec<String> = merge_keybinds(
+            &kb,
+            InputMode::Normal,
+            InputMode::Normal,
+            &no_labels(),
+            &no_mode_labels(),
+            &groups,
+        )
+        .iter()
+        .map(|e| e.keys[0].clone())
+        .collect();
+        assert_eq!(order, vec!["B", "C", "A"]);
     }
 
     #[test]
