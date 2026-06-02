@@ -70,7 +70,7 @@ impl ZellijPlugin for Plugin {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         match self {
             Plugin::Bar(state) => state.pipe(pipe_message),
-            Plugin::Search(_) => false,
+            Plugin::Search(search) => search.pipe(pipe_message),
             Plugin::WhichKey(which_key) => which_key.pipe(pipe_message),
         }
     }

@@ -598,6 +598,17 @@ impl State {
             self.app.search_active = shared.search_active;
             changed = true;
         }
+        // Search-option toggles drive the per-glyph highlight in the Search-mode
+        // hint segment; like `search_active` they ride the shared field.
+        if self.app.search_case_sensitive != shared.search_case_sensitive
+            || self.app.search_whole_word != shared.search_whole_word
+            || self.app.search_wrap != shared.search_wrap
+        {
+            self.app.search_case_sensitive = shared.search_case_sensitive;
+            self.app.search_whole_word = shared.search_whole_word;
+            self.app.search_wrap = shared.search_wrap;
+            changed = true;
+        }
         self.shared_generation = shared.generation;
         self.last_shared = shared.clone();
         if changed {

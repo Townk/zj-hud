@@ -85,6 +85,70 @@ pub fn mode_segment(mode: InputMode, bg: Color, is_last: bool, config: &Config) 
     Some(format_segment(bg, &text, is_last))
 }
 
+// ─── Mode hint segments ────────────────────────────────────────────────────────
+
+/// Foreground for an "active"/keycap glyph in the mode-hint segments.
+const HINT_GLYPH_ON: Color = Color {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+
+/// Keycap glyphs for the Locked-mode exit hint (Alt and Esc).
+const GLYPH_ALT: &str = "\u{F0635}";
+const GLYPH_ESC: &str = "\u{F12B7}";
+/// Search-option glyphs: case-sensitivity, whole-word, and result wrap.
+const GLYPH_SEARCH_CASE: &str = "\u{EAB1}";
+const GLYPH_SEARCH_WORD: &str = "\u{EB7E}";
+const GLYPH_SEARCH_WRAP: &str = "\u{F0547}";
+
+/// Build the Locked-mode hint segment shown to the right of the mode indicator:
+/// the Alt and Esc keycap glyphs in bright white, then the word `exit` in
+/// `dark` (the mode indicator's background color). `bg` is the segment's own
+/// background; `dark` is the slightly-darker mode color used for the label.
+pub fn locked_hint_segment(bg: Color, dark: Color, is_last: bool) -> Segment {
+    let trailing = if is_last { "" } else { " " };
+    let plain = format!(" {GLYPH_ALT} {GLYPH_ESC}  exit{trailing}");
+    let width = UnicodeWidthStr::width(plain.as_str());
+    let text = format!(
+        "{bg}{on} {GLYPH_ALT} {GLYPH_ESC}  {dark}exit{trailing}",
+        bg = bg.to_ansi_bg(),
+        on = HINT_GLYPH_ON.to_ansi_fg(),
+        dark = dark.to_ansi_fg(),
+    );
+    Segment { text, width, bg }
+}
+
+/// Build the Search-mode hint segment: the words `case`, `word`, `wrap` in
+/// `dark`, each preceded by its glyph — bright white when that option is on,
+/// `dark` when off. `bg` is the segment background; `dark` is the mode color.
+pub fn search_hint_segment(
+    bg: Color,
+    dark: Color,
+    case_on: bool,
+    word_on: bool,
+    wrap_on: bool,
+    is_last: bool,
+) -> Segment {
+    let trailing = if is_last { "" } else { " " };
+    let plain =
+        format!(" {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap{trailing}");
+    let width = UnicodeWidthStr::width(plain.as_str());
+
+    let on = HINT_GLYPH_ON.to_ansi_fg();
+    let dark_fg = dark.to_ansi_fg();
+    let glyph_fg = |is_on: bool| if is_on { on.as_str() } else { dark_fg.as_str() };
+    let text = format!(
+        "{bg} {cf}{GLYPH_SEARCH_CASE}{d} case  {wf}{GLYPH_SEARCH_WORD}{d} word  {pf}{GLYPH_SEARCH_WRAP}{d} wrap{trailing}",
+        bg = bg.to_ansi_bg(),
+        cf = glyph_fg(case_on),
+        wf = glyph_fg(word_on),
+        pf = glyph_fg(wrap_on),
+        d = dark_fg,
+    );
+    Segment { text, width, bg }
+}
+
 // ─── Session segment ──────────────────────────────────────────────────────────
 
 /// Returns a segment for the session name, or `None` if it's the default.
@@ -348,6 +412,42 @@ mod tests {
             mode_segment(InputMode::Locked, Color::new(255, 102, 102), false, &config).unwrap();
 
         assert!(seg.text.contains("L Passthrough"));
+    }
+
+    // ── Mode hint segments ───────────────────────────────────────────────
+
+    #[test]
+    fn locked_hint_renders_keycaps_and_exit() {
+        let seg = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40), false);
+        assert!(seg.text.contains(GLYPH_ALT));
+        assert!(seg.text.contains(GLYPH_ESC));
+        assert!(seg.text.contains("exit"));
+        // " 󰘵 󱊷  exit " → 11 cells (last=false keeps the trailing space).
+        assert_eq!(seg.width, 11);
+    }
+
+    #[test]
+    fn locked_hint_last_drops_trailing_space() {
+        let mid = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40), false);
+        let last = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40), true);
+        assert_eq!(last.width, mid.width - 1);
+    }
+
+    #[test]
+    fn search_hint_highlights_only_active_options() {
+        let dark = Color::new(40, 40, 80);
+        let on = HINT_GLYPH_ON.to_ansi_fg();
+        // Only `word` is on: its glyph must be white, case/wrap must be dark.
+        let seg = search_hint_segment(dark, dark, false, true, false, false);
+        let word_white = format!("{}{}", on, GLYPH_SEARCH_WORD);
+        assert!(seg.text.contains(&word_white));
+        let case_white = format!("{}{}", on, GLYPH_SEARCH_CASE);
+        let wrap_white = format!("{}{}", on, GLYPH_SEARCH_WRAP);
+        assert!(!seg.text.contains(&case_white));
+        assert!(!seg.text.contains(&wrap_white));
+        assert!(seg.text.contains("case"));
+        assert!(seg.text.contains("word"));
+        assert!(seg.text.contains("wrap"));
     }
 
     #[test]

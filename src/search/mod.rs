@@ -17,7 +17,7 @@
 //! before any plugin grab can see them, so our custom text field would never
 //! receive input there (verified empirically). The status bar still shows a
 //! Search indicator: the search pane writes a `search_active` flag into the
-//! shared session state (`set_search_active`) and broadcasts it, since the
+//! shared session state (`publish_search_state`) and broadcasts it, since the
 //! indicator can no longer be inferred from the (now `Normal`) client mode.
 //!
 //! ## Key capture
@@ -49,7 +49,8 @@
 //! options — no focus bounce, no mode change. Because zellij's `clear_search`
 //! resets all search options on every `SearchInput`, the case / whole-word
 //! toggles (configurable `search { case_key; word_key }`, default `Alt+c` /
-//! `Alt+b`) and the always-on wrap are re-applied after the needle each time
+//! `Alt+b`) and wrap (`Alt+p`, seeded from the shared state) are re-applied
+//! after the needle each time
 //! (see `apply_search_options`).
 //!
 //! ## Persistence
@@ -223,13 +224,16 @@ impl KeyChord {
     }
 }
 
-/// The dialog's two configurable search-option toggle chords, authored on the
-/// bar as `search { case_key "…"; word_key "…" }` and forwarded through the
-/// shared state. Defaults: case = `Alt+c`, whole-word = `Alt+b` ("boundaries").
+/// The dialog's configurable search-option toggle chords, authored on the bar
+/// as `search { case_key "…"; word_key "…"; wrap_key "…" }` and forwarded
+/// through the shared state. Defaults: case = `Alt+c`, whole-word = `Alt+b`
+/// ("boundaries"), wrap = `Alt+p` (matching the native `Search`-mode bind, so
+/// the same chord toggles wrap whether the dialog is up or not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SearchKeys {
     case: KeyChord,
     word: KeyChord,
+    wrap: KeyChord,
 }
 
 impl Default for SearchKeys {
@@ -245,13 +249,18 @@ impl Default for SearchKeys {
                 ctrl: false,
                 key: 'b',
             },
+            wrap: KeyChord {
+                alt: true,
+                ctrl: false,
+                key: 'p',
+            },
         }
     }
 }
 
 impl SearchKeys {
-    /// Parse `case_key` / `word_key` from the forwarded `search { … }` block.
-    /// Missing or unparseable specs keep their default.
+    /// Parse `case_key` / `word_key` / `wrap_key` from the forwarded
+    /// `search { … }` block. Missing or unparseable specs keep their default.
     fn from_block(block: &str) -> Self {
         let mut keys = SearchKeys::default();
         let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
@@ -271,6 +280,13 @@ impl SearchKeys {
         {
             keys.word = spec;
         }
+        if let Some(spec) = doc
+            .get_arg("wrap_key")
+            .map(crate::shared::kdl::kdl_value_to_config_string)
+            .and_then(|s| KeyChord::parse(&s))
+        {
+            keys.wrap = spec;
+        }
         keys
     }
 }
@@ -289,14 +305,16 @@ const THEME_BG_RGB: (u8, u8, u8) = (0x1E, 0x1E, 0x2E);
 const BORDER_CHAR: char = '┃';
 
 /// Search-option indicator glyphs, shown at the right end of the input area:
-/// case-sensitivity (``) and whole-word (``).
+/// case-sensitivity, whole-word, and result wrap.
 const GLYPH_CASE: char = '\u{EAB1}';
 const GLYPH_WORD: char = '\u{EB7E}';
+const GLYPH_WRAP: char = '\u{F0547}';
 /// Indicator foreground when the option is OFF (dark grey) and ON (yellow).
 const TOGGLE_OFF_RGB: (u8, u8, u8) = (0x45, 0x47, 0x5A);
 const TOGGLE_ON_RGB: (u8, u8, u8) = (0xF9, 0xE2, 0xAF);
-/// Columns reserved at the end of the input area for the two indicators.
-const TOGGLE_W: usize = 3;
+/// Columns reserved at the end of the input area for the three indicators:
+/// case, a space, word, two spaces (extra gap before wrap), wrap.
+const TOGGLE_W: usize = 6;
 
 // Decorative frame glyphs wrapping the input area. Drawn with the input bg as
 // foreground over the pane bg, so the partial-block shapes blend the input box
@@ -376,6 +394,9 @@ pub struct SearchPane {
     case_sensitive: bool,
     /// Whole-word matching toggle (see `keys.word`).
     whole_word: bool,
+    /// Result-wrapping toggle (see `keys.wrap`). Defaults on (set in `load`),
+    /// reproducing the dialog's historical always-wrap behaviour.
+    term_wrap: bool,
     /// Optional debug-log path (from the `debug_log` config key).
     debug_log: Option<String>,
     /// Session name, tracked from `ModeUpdate` so we can write the shared
@@ -404,6 +425,9 @@ pub struct SearchPane {
 impl ZellijPlugin for SearchPane {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.debug_log = configuration.get("debug_log").cloned();
+        // Wrap is on by default (the dialog historically always wrapped); the
+        // `wrap_key` chord toggles it off. The other options default off.
+        self.term_wrap = true;
         // Identical set for both roles so the per-URL permission cache stays
         // stable (see `crate::PLUGIN_PERMISSIONS`). We actually use
         // `RunActionsAsUser` (native search), `ChangeApplicationState` (mode
@@ -445,7 +469,7 @@ impl ZellijPlugin for SearchPane {
             // drive; teardown happens explicitly in submit/close/finish.
             Event::ModeUpdate(info) => {
                 let new = info.mode;
-                // Track the session name so `set_search_active` writes to the
+                // Track the session name so `publish_search_state` writes to the
                 // same session-scoped state file the bar reads.
                 if let Some(name) = info.session_name {
                     self.session_name = name;
@@ -591,6 +615,42 @@ impl SearchPane {
         self.my_tab == Some(self.active_tab)
     }
 
+    /// Drive a native `Search`-mode option toggle and mirror it to the bar. The
+    /// `search`-mode keybind sends `MessagePlugin "status-bar" { role "search" }`
+    /// to this pipe (payload `case`/`word`/`wrap`). We own the search options, so
+    /// we flip the matching flag, run the native `SearchToggleOption` against the
+    /// focused pane, and publish so the bar's Search-mode hint tracks it — a
+    /// plugin can't otherwise observe native `SearchToggleOption`. The pipe
+    /// reaches every per-tab Search instance; only the active tab's acts, since
+    /// both the action and the flag are toggles (multiple would net the wrong
+    /// parity). Matching is exact and our config is just `role "search"`, so the
+    /// pipe lands here rather than spawning a fresh instance.
+    pub(crate) fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if pipe_message.name != crate::shared::state::SEARCH_TOGGLE_PIPE
+            || !self.is_on_active_tab()
+        {
+            return false;
+        }
+        let option = match pipe_message.payload.as_deref().map(str::trim) {
+            Some("case") => {
+                self.case_sensitive = !self.case_sensitive;
+                SearchOption::CaseSensitivity
+            }
+            Some("word") => {
+                self.whole_word = !self.whole_word;
+                SearchOption::WholeWord
+            }
+            Some("wrap") => {
+                self.term_wrap = !self.term_wrap;
+                SearchOption::Wrap
+            }
+            _ => return false,
+        };
+        run_action(Action::SearchToggleOption { option }, BTreeMap::new());
+        self.publish_search_state(self.active);
+        false
+    }
+
     /// Where a cancel (<Esc>) should land, captured when the dialog opens.
     ///
     /// Normally that's the mode we launched from (e.g. `Normal`, `Scroll`). But
@@ -673,7 +733,7 @@ impl SearchPane {
     /// We hold the client in `Normal` while typing because it is the only mode
     /// in which `intercept_key_presses` delivers keys to us — `EnterSearch`/
     /// `Search` consume them natively first. The bar's Search indicator is
-    /// driven explicitly (see `set_search_active`) rather than from the
+    /// driven explicitly (see `publish_search_state`) rather than from the
     /// client mode. On cancel (<Esc>) we return to `origin_mode`; on submit
     /// (<Enter>) we hand off to native `Search` mode (see `submit`).
     fn activate(&mut self) {
@@ -758,29 +818,34 @@ impl SearchPane {
         // `EnterSearch`/`Search` the native input layer consumes the keys first
         // and our dialog never sees them (proven empirically). So our custom
         // text field can only work in `Normal`. The bar still shows the Search
-        // indicator: we write the shared `search_active` flag (`set_search_active`)
+        // indicator: we write the shared `search_active` flag (`publish_search_state`)
         // because it can no longer be read from the (now `Normal`) client mode.
         switch_to_input_mode(&InputMode::Normal);
-        self.set_search_active(true);
+        self.publish_search_state(true);
         self.log(
             "[activate] revealed(unfocused) + pinned + intercept; mode->Normal + bar:search=1\n",
         );
         self.request_prefill();
     }
 
-    /// Publish the search-dialog on/off state to the shared session state so the
-    /// visible bar lights its Search indicator. We keep the *client* mode in
-    /// `Normal` while the dialog is up (the only mode in which
+    /// Publish the search-dialog on/off state plus the current option toggles to
+    /// the shared session state, so the visible bar can light its Search
+    /// indicator and render the option hint (case / word / wrap). We keep the
+    /// *client* mode in `Normal` while the dialog is up (the only mode in which
     /// `intercept_key_presses` delivers keys to us), so the bar can't infer
-    /// "search active" from the mode and reads this field instead. Writing the
+    /// "search active" from the mode and reads these fields instead. Writing the
     /// shared file (and broadcasting it) keeps a single cross-role state
-    /// contract rather than a dedicated indicator pipe.
-    fn set_search_active(&self, active: bool) {
+    /// contract rather than a dedicated indicator pipe. The option flags persist
+    /// across the dialog parking, so the hint stays accurate in native `Search`.
+    fn publish_search_state(&self, active: bool) {
         let path =
             crate::shared::state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
         if let Some(state) =
             crate::shared::state::mutate_state_file(&path, get_plugin_ids().plugin_id, |s| {
-                s.search_active = active
+                s.search_active = active;
+                s.search_case_sensitive = self.case_sensitive;
+                s.search_whole_word = self.whole_word;
+                s.search_wrap = self.term_wrap;
             })
         {
             if let Ok(payload) = serde_json::to_string(&state) {
@@ -800,12 +865,21 @@ impl SearchPane {
             self.case_sensitive = !self.case_sensitive;
             self.last_searched = None;
             self.live_search();
+            self.publish_search_state(true);
             return true;
         }
         if self.keys.word.matches(&key) {
             self.whole_word = !self.whole_word;
             self.last_searched = None;
             self.live_search();
+            self.publish_search_state(true);
+            return true;
+        }
+        if self.keys.wrap.matches(&key) {
+            self.term_wrap = !self.term_wrap;
+            self.last_searched = None;
+            self.live_search();
+            self.publish_search_state(true);
             return true;
         }
         match decode_key(&key) {
@@ -857,13 +931,15 @@ impl SearchPane {
                 BTreeMap::new(),
             );
         }
-        // Wrap is always on; the default is off, so always toggle it.
-        run_action(
-            Action::SearchToggleOption {
-                option: SearchOption::Wrap,
-            },
-            BTreeMap::new(),
-        );
+        // The grid default is wrap-off, so toggle only when the user wants it on.
+        if self.term_wrap {
+            run_action(
+                Action::SearchToggleOption {
+                    option: SearchOption::Wrap,
+                },
+                BTreeMap::new(),
+            );
+        }
     }
 
     /// Search-as-you-type: when the debounce fires and the term changed, push
@@ -955,7 +1031,7 @@ impl SearchPane {
         self.active = false;
         self.closing = false;
         clear_key_presses_intercepts();
-        self.set_search_active(false);
+        self.publish_search_state(false);
         set_selectable(false);
         self.park();
         switch_to_input_mode(&InputMode::Search);
@@ -983,7 +1059,7 @@ impl SearchPane {
                 BTreeMap::new(),
             );
         }
-        self.set_search_active(false);
+        self.publish_search_state(false);
         switch_to_input_mode(&self.origin_mode);
         set_selectable(false);
         self.park();
@@ -1050,12 +1126,20 @@ impl SearchPane {
     fn load_geom(&mut self) {
         let path =
             crate::shared::state::state_path(get_plugin_ids().zellij_pid, &self.session_name);
-        let block = crate::shared::state::read_state_from(&path)
-            .map(|s| s.search_config)
-            .unwrap_or_default();
-        self.geom = SearchGeom::from_block(&block);
-        self.keys = SearchKeys::from_block(&block);
-        self.log(&format!("[geom] {:?} keys={:?}\n", self.geom, self.keys));
+        let shared = crate::shared::state::read_state_from(&path).unwrap_or_default();
+        self.geom = SearchGeom::from_block(&shared.search_config);
+        self.keys = SearchKeys::from_block(&shared.search_config);
+        // Seed the option flags from the shared state so the dialog reflects (and
+        // preserves) toggles made elsewhere (the dialog's own `keys.wrap`/`case`/
+        // `word`, or — if wired — a native `Search`-mode toggle mirrored to the
+        // bar). Without this, reopening the dialog would clobber the prior state.
+        self.case_sensitive = shared.search_case_sensitive;
+        self.whole_word = shared.search_whole_word;
+        self.term_wrap = shared.search_wrap;
+        self.log(&format!(
+            "[geom] {:?} keys={:?} case={} word={} wrap={}\n",
+            self.geom, self.keys, self.case_sensitive, self.whole_word, self.term_wrap
+        ));
     }
 
     fn anchor(&mut self, manifest: &PaneManifest) {
@@ -1287,9 +1371,10 @@ impl SearchPane {
         ));
 
         // Option indicators in the reserved columns at the right end of the
-        // input area: ` 󰘵 󰘵 ` style — leading gap, case glyph, gap, word glyph,
-        // trailing gap (5 columns). Yellow when on, dark grey when off, over the
-        // input background.
+        // input area: case glyph, gap, word glyph, gap, gap, wrap glyph (6
+        // columns). Yellow when on, dark grey when off, over the input
+        // background. Wrap toggles in-dialog with `keys.wrap` (default Alt+p)
+        // and is seeded from the shared state on activate.
         let color = |(r, g, b): (u8, u8, u8)| format!("\u{1b}[38;2;{r};{g};{b}m");
         let c_fg = color(if self.case_sensitive {
             TOGGLE_ON_RGB
@@ -1301,8 +1386,13 @@ impl SearchPane {
         } else {
             TOGGLE_OFF_RGB
         });
+        let p_fg = color(if self.term_wrap {
+            TOGGLE_ON_RGB
+        } else {
+            TOGGLE_OFF_RGB
+        });
         out.push_str(&format!(
-            "\u{1b}[{};{}H{input_bg}{c_fg}{GLYPH_CASE}{reset}{input_bg} {w_fg}{GLYPH_WORD}{reset}",
+            "\u{1b}[{};{}H{input_bg}{c_fg}{GLYPH_CASE}{reset}{input_bg} {w_fg}{GLYPH_WORD}{reset}{input_bg}  {p_fg}{GLYPH_WRAP}{reset}",
             FIELD_ROW + 1,
             // Anchored to the right end of the input area, independent of field_w.
             input_end_col - TOGGLE_W + 2,

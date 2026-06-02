@@ -13,7 +13,8 @@
 //!   `which_key_config` and `search_config` carry the raw `which_key { … }` /
 //!   `search { … }` blocks (authored once on the bar) to the panel and the
 //!   search dialog, so those roles need no geometry config of their own.
-//! - `search_active` — the **Search** role.
+//! - `search_active` / `search_case_sensitive` / `search_whole_word` /
+//!   `search_wrap` — the **Search** role.
 //! - `suppressed` / `page` — the **WhichKey** role.
 
 use std::collections::BTreeMap;
@@ -33,6 +34,13 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// instances of the plugin URL. The single channel (rather than per-purpose
 /// pipes) keeps the cross-instance contract to one type.
 pub const SYNC_PIPE: &str = "__zj_hud_sync_state";
+
+/// Pipe name a user keybind targets (via the `MessagePlugin` action) to mirror
+/// a native `Search`-mode option toggle into the bar. The payload selects the
+/// option: `case`, `word`, or `wrap`. The bar flips the matching shared flag so
+/// its Search hint reflects the live native search options — which a plugin
+/// otherwise cannot observe (`SearchToggleOption` keypresses never reach it).
+pub const SEARCH_TOGGLE_PIPE: &str = "zj_hud_search_toggle";
 
 /// A single mode's display style, published by the Bar so the WhichKey panel
 /// can render glyphs/colors/labels identical to the bar without a duplicate
@@ -61,6 +69,15 @@ pub struct SharedState {
     pub page: usize,
     #[serde(default)]
     pub search_active: bool,
+    /// Live search-option toggles, owned by the **Search** role and read by the
+    /// Bar to render the Search-mode hint segment. `search_wrap` defaults on to
+    /// match the dialog's always-wrap behaviour before any toggle is published.
+    #[serde(default)]
+    pub search_case_sensitive: bool,
+    #[serde(default)]
+    pub search_whole_word: bool,
+    #[serde(default = "default_true")]
+    pub search_wrap: bool,
     /// Mode-name -> display style, owned by the active Bar (see module docs).
     #[serde(default)]
     pub palette: BTreeMap<String, ModePalette>,
@@ -86,6 +103,10 @@ fn default_mode() -> String {
     mode_name(InputMode::Normal).to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for SharedState {
     fn default() -> Self {
         Self {
@@ -98,6 +119,9 @@ impl Default for SharedState {
             suppressed: false,
             page: 0,
             search_active: false,
+            search_case_sensitive: false,
+            search_whole_word: false,
+            search_wrap: true,
             palette: BTreeMap::new(),
             which_key_config: String::new(),
             search_config: String::new(),

@@ -116,6 +116,12 @@ pub struct AppState {
     /// read this field instead. When set, the bar renders the Search indicator
     /// regardless of `mode`.
     pub search_active: bool,
+    /// Mirror of the shared search-option toggles (written by the Search role),
+    /// used to render the per-option glyphs in the Search-mode hint segment.
+    /// `search_wrap` mirrors the dialog's wrap toggle (default on).
+    pub search_case_sensitive: bool,
+    pub search_whole_word: bool,
+    pub search_wrap: bool,
     pub tabs: Vec<TabInfo>,
     pub panes: HashMap<usize, Vec<PaneInfo>>,
     /// Terminal pane IDs we actually care about for `PaneRenderReport` events
@@ -157,6 +163,9 @@ impl Default for AppState {
         Self {
             mode: InputMode::Normal,
             search_active: false,
+            search_case_sensitive: false,
+            search_whole_word: false,
+            search_wrap: true,
             tabs: Vec::new(),
             panes: HashMap::new(),
             interesting_panes: HashSet::new(),

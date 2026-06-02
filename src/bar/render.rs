@@ -6,8 +6,8 @@ use crate::bar::config::Config;
 use crate::bar::state::AppState;
 use crate::bar::status::system;
 use crate::bar::status::{
-    divider, divider_width, info_widgets_segment, mode_segment, session_segment, time_segment,
-    InfoWidgetsResult, Segment,
+    divider, divider_width, info_widgets_segment, locked_hint_segment, mode_segment,
+    search_hint_segment, session_segment, time_segment, InfoWidgetsResult, Segment,
 };
 use crate::bar::tabs::layout::{compute_tab_layout, CHEVRON_TAB_WIDTH};
 use crate::bar::tabs::{compose_tab_title, render_tab_title};
@@ -258,6 +258,11 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
 
     let mode_present = is_non_normal;
 
+    // ── Mode hint segment (Locked exit hint / Search options) ──────────────
+    // Sits directly right of the mode indicator. Only Locked and Search carry a
+    // hint, and both are non-Normal, so `mode_present` is always true here.
+    let hint_present = matches!(effective_mode, InputMode::Locked | InputMode::Search);
+
     // ── Info widgets segment (None unless `system_info` is configured) ─────
     let system_info_block =
         config.status.system_info.as_ref().filter(|block| {
@@ -281,6 +286,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     let widgets_present = widgets_segment_probe.is_some();
 
     let segment_count = mode_present as usize
+        + hint_present as usize
         + session_present as usize
         + widgets_present as usize
         + time_present as usize;
@@ -317,6 +323,9 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     if mode_present {
         specs.push(next_spec());
     }
+    if hint_present {
+        specs.push(next_spec());
+    }
     if session_present {
         specs.push(next_spec());
     }
@@ -333,6 +342,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
 
     enum Built {
         Mode(Segment),
+        Hint(Segment),
         Session(Segment),
         Widgets(InfoWidgetsResult),
         Time(Segment),
@@ -341,11 +351,31 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     let mut built: Vec<Built> = Vec::with_capacity(segment_count);
     let mut spec_iter = specs.into_iter();
 
+    // The mode indicator's background doubles as the "darker" label/off-glyph
+    // color for the hint segment (it's one gradient stop darker than the hint's
+    // own bg). Capture it as we consume the mode spec.
+    let mut mode_bg = base_color;
     if mode_present {
         let s = spec_iter.next().unwrap();
+        mode_bg = s.bg;
         if let Some(seg) = mode_segment(effective_mode, s.bg, s.is_last, config) {
             built.push(Built::Mode(seg));
         }
+    }
+    if hint_present {
+        let s = spec_iter.next().unwrap();
+        let seg = match effective_mode {
+            InputMode::Locked => locked_hint_segment(s.bg, mode_bg, s.is_last),
+            _ => search_hint_segment(
+                s.bg,
+                mode_bg,
+                state.search_case_sensitive,
+                state.search_whole_word,
+                state.search_wrap,
+                s.is_last,
+            ),
+        };
+        built.push(Built::Hint(seg));
     }
     if session_present {
         let s = spec_iter.next().unwrap();
@@ -387,14 +417,14 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
 
     for (idx, item) in built.iter().enumerate() {
         let seg_bg = match item {
-            Built::Mode(s) | Built::Session(s) | Built::Time(s) => s.bg,
+            Built::Mode(s) | Built::Hint(s) | Built::Session(s) | Built::Time(s) => s.bg,
             Built::Widgets(r) => r.segment.bg,
         };
         let left_bg = if idx == 0 {
             BAR_BG
         } else {
             match &built[idx - 1] {
-                Built::Mode(s) | Built::Session(s) | Built::Time(s) => s.bg,
+                Built::Mode(s) | Built::Hint(s) | Built::Session(s) | Built::Time(s) => s.bg,
                 Built::Widgets(r) => r.segment.bg,
             }
         };
@@ -416,7 +446,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
                     ClickAction::SwitchToMode(InputMode::Normal),
                 );
             }
-            Built::Session(s) | Built::Time(s) => {
+            Built::Hint(s) | Built::Session(s) | Built::Time(s) => {
                 text.push_str(&s.text);
                 total_width += s.width;
                 if matches!(item, Built::Time(_)) {
@@ -487,6 +517,34 @@ mod tests {
         let config = Config::default();
         let right = build_right_side(&state, &config, 80);
         assert!(right.width > 0);
+    }
+
+    #[test]
+    fn locked_mode_shows_exit_hint() {
+        let state = AppState {
+            mode: InputMode::Locked,
+            session_name: "main".to_string(),
+            ..AppState::default()
+        };
+        let config = Config::default();
+        let right = build_right_side(&state, &config, 80);
+        assert!(right.text.contains("exit"));
+    }
+
+    #[test]
+    fn search_mode_shows_option_hint() {
+        let state = AppState {
+            mode: InputMode::Normal,
+            search_active: true,
+            search_whole_word: true,
+            session_name: "main".to_string(),
+            ..AppState::default()
+        };
+        let config = Config::default();
+        let right = build_right_side(&state, &config, 80);
+        assert!(right.text.contains("case"));
+        assert!(right.text.contains("word"));
+        assert!(right.text.contains("wrap"));
     }
 
     #[test]
