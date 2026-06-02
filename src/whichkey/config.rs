@@ -67,8 +67,9 @@ pub struct Config {
     /// a mode is named, such as `Command …` switch entries.
     pub mode_labels: ModeLabels,
 
-    /// Binding groups that render contiguously (anchored at each group's
-    /// smallest member), optionally scoped to one or more modes.
+    /// Binding groups that render contiguously in the configured member order
+    /// (anchored at each group's first member), optionally scoped to one or more
+    /// modes.
     pub groups: Vec<Group>,
 
     /// When set, append per-page layout diagnostics (column widths + each
@@ -261,22 +262,26 @@ fn page_key_glyph(chord: &str) -> Option<String> {
 /// The node name (`wk`) is a fixed marker and ignored. `binding` (the chord,
 /// normalized via [`parse_chord`] so it matches the live keymap) and `desc` are
 /// required; `mode`, `icon` and `icon_color` are optional. `mode` scopes the
-/// label to a single Zellij mode (e.g. `mode="pane"`); without it the label is
-/// modeless and applies in every mode (a mode-scoped label for the same chord
-/// wins where both exist). This lets one chord read differently per mode, e.g.
+/// label to one or more Zellij modes — a whitespace/comma-separated list with
+/// the same grammar as the `groups` block (e.g. `mode="pane"`,
+/// `mode="scroll search"`, or the `search` alias → Search+EnterSearch), parsed
+/// by [`parse_mode_list`]. Without `mode` the label is modeless and applies in
+/// every mode (a mode-scoped label for the same chord wins where both exist).
+/// This lets one chord read differently per mode, e.g.
 ///
 /// ```kdl
 /// labels {
 ///     wk binding="Ctrl h" desc="focus left"            // modeless fallback
 ///     wk mode="pane" binding="r" desc="rename pane"
 ///     wk mode="tab"  binding="r" desc="rename tab"
+///     wk mode="scroll search" binding="u" desc="half page up"  // both modes
 /// }
 /// ```
 ///
 /// `icon_color` is a `#RGB`/`#RRGGBB` hex or 256-color index (stored as an SGR
 /// sequence; an unparseable color is dropped, so the icon keeps the label
-/// color). Properties are order-independent. An unrecognized `mode` drops the
-/// entry (rather than silently making it modeless).
+/// color). Properties are order-independent. A `mode` that resolves to no modes
+/// drops the entry (rather than silently making it modeless).
 fn parse_labels_block(block: &str) -> Labels {
     let mut out = Labels::new();
     let Some(doc) = crate::shared::kdl::parse_config_document(block, &[]) else {
@@ -292,24 +297,28 @@ fn parse_labels_block(block: &str) -> Labels {
         let Some(canonical) = parse_chord(binding) else {
             continue;
         };
-        // An explicit `mode` must resolve, else skip the entry; absent `mode`
-        // means modeless (applies everywhere).
-        let mode = match node_prop(node, "mode") {
-            Some(m) => match str_to_mode(m) {
-                Some(mode) => Some(mode),
-                None => continue,
-            },
-            None => None,
+        // `mode` may list one or more modes (whitespace/comma separated, with
+        // the `search` group alias), mirroring the `groups` block. Absent `mode`
+        // is modeless (applies everywhere); an explicit `mode` that resolves to
+        // no modes drops the entry rather than silently making it modeless.
+        let modes: Option<Vec<InputMode>> = node_prop(node, "mode").map(parse_mode_list);
+        if matches!(&modes, Some(m) if m.is_empty()) {
+            continue;
+        }
+        let spec = LabelSpec {
+            desc: desc.trim().to_string(),
+            icon: node_prop(node, "icon").map(|s| s.trim().to_string()),
+            icon_color: node_prop(node, "icon_color").and_then(parse_color),
         };
-        out.insert(
-            mode,
-            canonical,
-            LabelSpec {
-                desc: desc.trim().to_string(),
-                icon: node_prop(node, "icon").map(|s| s.trim().to_string()),
-                icon_color: node_prop(node, "icon_color").and_then(parse_color),
-            },
-        );
+        match modes {
+            // Scope the label to every listed mode (the same spec applies in each).
+            Some(modes) => {
+                for mode in modes {
+                    out.insert(Some(mode), canonical.clone(), spec.clone());
+                }
+            }
+            None => out.insert(None, canonical, spec),
+        }
     }
     out
 }
@@ -767,6 +776,45 @@ mod tests {
         assert_eq!(labels.lookup(InputMode::Move, "r").unwrap().desc, "rename");
         // An unrecognized `mode` drops the entry entirely.
         assert!(labels.lookup(InputMode::Normal, "x").is_none());
+    }
+
+    #[test]
+    fn labels_block_scopes_to_multiple_modes_and_aliases() {
+        let blob = concat!(
+            // Whitespace-separated mode list.
+            "    wk mode=\"scroll search\" binding=\"u\" desc=\"half page up\"\n",
+            // Comma-separated list.
+            "    wk mode=\"pane,tab\" binding=\"r\" desc=\"rename\"\n",
+            // The `search` alias expands to both phases.
+            "    wk mode=\"search\" binding=\"n\" desc=\"next match\"\n",
+            // Resolves to nothing → dropped (not made modeless).
+            "    wk mode=\"bogus\" binding=\"z\" desc=\"dropped\"\n",
+        );
+        let labels = parse_labels_block(blob);
+        // The same spec lands in every listed mode...
+        assert_eq!(
+            labels.lookup(InputMode::Scroll, "u").unwrap().desc,
+            "half page up"
+        );
+        assert_eq!(
+            labels.lookup(InputMode::Search, "u").unwrap().desc,
+            "half page up"
+        );
+        // ...but not in unlisted ones.
+        assert!(labels.lookup(InputMode::Normal, "u").is_none());
+        assert_eq!(labels.lookup(InputMode::Pane, "r").unwrap().desc, "rename");
+        assert_eq!(labels.lookup(InputMode::Tab, "r").unwrap().desc, "rename");
+        // `search` alias covers both phases.
+        assert_eq!(
+            labels.lookup(InputMode::Search, "n").unwrap().desc,
+            "next match"
+        );
+        assert_eq!(
+            labels.lookup(InputMode::EnterSearch, "n").unwrap().desc,
+            "next match"
+        );
+        // A `mode` that resolves to nothing drops the entry.
+        assert!(labels.lookup(InputMode::Normal, "z").is_none());
     }
 
     #[test]
