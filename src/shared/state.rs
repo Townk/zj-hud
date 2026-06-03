@@ -235,7 +235,7 @@ pub fn state_path(zellij_pid: u32, session: &str) -> String {
     format!("/tmp/zj-hud-state-{zellij_pid}-{session}.json")
 }
 
-fn sanitize_path_component(value: &str) -> String {
+pub fn sanitize_path_component(value: &str) -> String {
     value
         .chars()
         .map(|ch| {

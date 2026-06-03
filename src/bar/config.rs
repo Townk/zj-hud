@@ -50,6 +50,9 @@ pub struct IconLibrary {
     pub tab_icon: String,
     pub zoom_icon: String,
     pub input_sync_icon: String,
+    pub alarm_armed: String,
+    pub alarm_fired_idle: String,
+    pub alarm_fired_activity: String,
     pub calendar: String,
 }
 
@@ -62,6 +65,9 @@ impl Default for IconLibrary {
             tab_icon: icons::TAB_ICON.to_string(),
             zoom_icon: icons::ZOOM_ICON.to_string(),
             input_sync_icon: icons::INPUT_SYNC_ICON.to_string(),
+            alarm_armed: icons::ALARM_ARMED.to_string(),
+            alarm_fired_idle: icons::ALARM_FIRED_IDLE.to_string(),
+            alarm_fired_activity: icons::ALARM_FIRED_ACTIVITY.to_string(),
             calendar: icons::CALENDAR.to_string(),
         }
     }
@@ -195,6 +201,46 @@ pub struct Config {
     /// the Search dialog through the shared state (the bar itself does not
     /// interpret it). Empty when no block is configured.
     pub search_config: String,
+    /// Settings for the per-pane background-tab alarms (idle / activity
+    /// notifications). Interpreted by the bar (unlike `which_key`/`search`).
+    pub alarms: AlarmConfig,
+}
+
+/// Configuration for the per-pane alarm subsystem (see [`crate::shared::alarms`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlarmConfig {
+    /// How long a pane's output must stay unchanged before an `idle` alarm
+    /// fires.
+    pub idle_timeout: Duration,
+    /// Notification command as an argv template. The tokens `{title}`,
+    /// `{message}`, and `{group}` are substituted per fire. Passed straight to
+    /// `run_command` (no shell), so titles/messages with shell metacharacters
+    /// are safe.
+    pub notify_command: Vec<String>,
+}
+
+impl Default for AlarmConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout: Duration::from_secs(5),
+            notify_command: default_notify_command(),
+        }
+    }
+}
+
+fn default_notify_command() -> Vec<String> {
+    [
+        "terminal-notifier",
+        "-title",
+        "{title}",
+        "-message",
+        "{message}",
+        "-group",
+        "{group}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// Conventional install location of the plugin (mirrors the `justfile`).
@@ -297,6 +343,7 @@ impl Default for Config {
             search_plugin_url: default_search_plugin_url(),
             which_key_config: String::new(),
             search_config: String::new(),
+            alarms: AlarmConfig::default(),
         }
     }
 }
@@ -352,6 +399,9 @@ impl Config {
         }
         if let Some(block) = map.get("search") {
             cfg.search_config = block.clone();
+        }
+        if let Some(block) = map.get("alarms") {
+            parse_alarms_block(block, &mut cfg);
         }
 
         if let Some(v) = map.get("search_plugin_url") {
@@ -567,6 +617,41 @@ fn parse_modes_block(value: &str, config: &mut Config) {
 
 fn parse_modes_document(value: &str) -> Option<KdlDocument> {
     parse_config_document(value, &["color", "icon", "label"])
+}
+
+// ─── Alarms block parser ──────────────────────────────────────────────────────
+
+fn parse_alarms_block(value: &str, cfg: &mut Config) {
+    let Some(doc) = parse_config_document(
+        value,
+        &[
+            "idle_timeout",
+            "notify_command",
+            "armed_icon",
+            "fired_idle_icon",
+            "fired_activity_icon",
+        ],
+    ) else {
+        return;
+    };
+
+    if let Some(v) = document_value(&doc, "idle_timeout") {
+        if let Some(d) = parse_duration(&v) {
+            cfg.alarms.idle_timeout = d;
+        }
+    }
+    if let Some(args) = document_values(&doc, "notify_command") {
+        cfg.alarms.notify_command = args;
+    }
+    if let Some(v) = document_value(&doc, "armed_icon") {
+        cfg.icons.alarm_armed = parse_icon_value(&v);
+    }
+    if let Some(v) = document_value(&doc, "fired_idle_icon") {
+        cfg.icons.alarm_fired_idle = parse_icon_value(&v);
+    }
+    if let Some(v) = document_value(&doc, "fired_activity_icon") {
+        cfg.icons.alarm_fired_activity = parse_icon_value(&v);
+    }
 }
 
 fn document_value(doc: &KdlDocument, key: &str) -> Option<String> {
@@ -1315,6 +1400,50 @@ enter_search color="#f9e2af" icon="E" label="Enter"
         assert_eq!(format_widget_number(73.5), "73.5");
         assert_eq!(format_widget_number(73.12345), "73.1235");
         assert_eq!(format_widget_number(-1.0), "-1");
+    }
+
+    #[test]
+    fn alarms_defaults_when_block_absent() {
+        let cfg = Config::from_map(BTreeMap::new());
+        assert_eq!(cfg.alarms.idle_timeout, Duration::from_secs(5));
+        assert_eq!(
+            cfg.alarms.notify_command.first().map(String::as_str),
+            Some("terminal-notifier")
+        );
+        assert_eq!(cfg.icons.alarm_armed, icons::ALARM_ARMED);
+        assert_eq!(cfg.icons.alarm_fired_idle, icons::ALARM_FIRED_IDLE);
+        assert_eq!(cfg.icons.alarm_fired_activity, icons::ALARM_FIRED_ACTIVITY);
+    }
+
+    #[test]
+    fn parse_alarms_block_overrides() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "alarms".to_string(),
+            r##"
+idle_timeout "30s"
+notify_command "notify-send" "{title}" "{message}"
+armed_icon "U+F0210"
+fired_idle_icon "I"
+fired_activity_icon "A"
+"##
+            .to_string(),
+        );
+
+        let cfg = Config::from_map(map);
+
+        assert_eq!(cfg.alarms.idle_timeout, Duration::from_secs(30));
+        assert_eq!(
+            cfg.alarms.notify_command,
+            vec![
+                "notify-send".to_string(),
+                "{title}".to_string(),
+                "{message}".to_string()
+            ]
+        );
+        assert_eq!(cfg.icons.alarm_armed, "\u{F0210}");
+        assert_eq!(cfg.icons.alarm_fired_idle, "I");
+        assert_eq!(cfg.icons.alarm_fired_activity, "A");
     }
 
     #[test]

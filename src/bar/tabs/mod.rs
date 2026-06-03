@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::bar::config::Config;
 use crate::bar::state::AppState;
 use crate::bar::tabs::truncation::truncated_text;
+use crate::shared::alarms::AlarmKind;
 use crate::shared::icons;
 
 pub struct TabTitle {
@@ -46,6 +47,9 @@ pub fn compose_tab_title(
     }
     if state.tab_sync_active(tab_position) {
         extra_icons.push_str(&format!(" {}", config.icons.input_sync_icon));
+    }
+    if let Some(icon) = alarm_icon_for_tab(tab_position, state, config) {
+        extra_icons.push_str(&format!(" {}", icon));
     }
 
     TabTitle {
@@ -154,6 +158,37 @@ fn compose_body(tab_position: usize, tab_name: &str, state: &AppState, config: &
         config.icons.tab_dir,
         tab_position + 1
     ))
+}
+
+/// Alarm indicator glyph for a tab, if any of its terminal panes has an alarm.
+/// A fired alarm takes precedence over a merely armed one, and the fired glyph
+/// reflects which kind tripped (idle vs activity). With multiple fired panes of
+/// differing kinds in one tab, the first encountered wins.
+fn alarm_icon_for_tab<'a>(
+    tab_position: usize,
+    state: &AppState,
+    config: &'a Config,
+) -> Option<&'a str> {
+    let mut armed = false;
+    let mut fired_kind: Option<AlarmKind> = None;
+    for pane in state.panes_for_tab(tab_position) {
+        if pane.is_plugin {
+            continue;
+        }
+        if let Some(entry) = state.alarms.entries.get(&pane.id) {
+            if entry.fired {
+                fired_kind.get_or_insert(entry.kind);
+            } else {
+                armed = true;
+            }
+        }
+    }
+    match fired_kind {
+        Some(AlarmKind::Idle) => Some(&config.icons.alarm_fired_idle),
+        Some(AlarmKind::Activity) => Some(&config.icons.alarm_fired_activity),
+        None if armed => Some(&config.icons.alarm_armed),
+        None => None,
+    }
 }
 
 fn plain_body(text: String) -> TabBody {
@@ -544,6 +579,51 @@ mod tests {
             .find(&config.icons.input_sync_icon)
             .unwrap();
         assert!(zoom_at < sync_at);
+    }
+
+    #[test]
+    fn fired_alarm_renders_bell_icon_on_tab() {
+        use crate::shared::alarms::{AlarmEntry, AlarmKind};
+
+        let mut state = AppState::default();
+        state.panes.insert(
+            0,
+            vec![zellij_tile::prelude::PaneInfo {
+                id: 1,
+                is_focused: true,
+                title: "agent".to_string(),
+                ..Default::default()
+            }],
+        );
+        state.pane_cache.cmd.insert(1, vec!["agent".to_string()]);
+        state
+            .alarms
+            .entries
+            .insert(1, AlarmEntry::armed(AlarmKind::Idle, 0, 0));
+
+        let config = Config::default();
+
+        // Armed (not fired) -> watching glyph.
+        let title = compose_tab_title(0, "Tab #1", &state, &config);
+        assert!(title.extra_icons.contains(&config.icons.alarm_armed));
+        assert!(!title.extra_icons.contains(&config.icons.alarm_fired_idle));
+
+        // Fired idle -> idle bell glyph takes over.
+        state.alarms.entries.get_mut(&1).unwrap().fired = true;
+        let title = compose_tab_title(0, "Tab #1", &state, &config);
+        assert!(title.extra_icons.contains(&config.icons.alarm_fired_idle));
+        assert!(!title.extra_icons.contains(&config.icons.alarm_armed));
+
+        // Fired activity -> activity bell glyph.
+        state
+            .alarms
+            .entries
+            .insert(1, AlarmEntry::armed(AlarmKind::Activity, 0, 0));
+        state.alarms.entries.get_mut(&1).unwrap().fired = true;
+        let title = compose_tab_title(0, "Tab #1", &state, &config);
+        assert!(title
+            .extra_icons
+            .contains(&config.icons.alarm_fired_activity));
     }
 
     #[test]

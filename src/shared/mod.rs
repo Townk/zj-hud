@@ -5,6 +5,7 @@
 //! parsing helpers, [`geometry`] the floating-pane placement math, and
 //! [`color`]/[`icons`] the rendering primitives.
 
+pub mod alarms;
 pub mod color;
 pub mod geometry;
 pub mod icons;

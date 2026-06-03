@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use zellij_tile::prelude::*;
 
 use crate::bar::click_map::ClickMap;
+use crate::shared::alarms::AlarmStore;
 
 #[derive(Debug, Clone)]
 pub struct CachedValue<T> {
@@ -156,6 +157,11 @@ pub struct AppState {
     /// Per-`on_click` debounce: timestamp of the last fire for each
     /// `ClickAction::RunCommand(idx)`. Clicks within 100ms are dropped.
     pub last_click_run: HashMap<usize, Instant>,
+    /// In-memory mirror of the session-scoped alarm store. Owned by the active
+    /// instance: loaded from disk when this instance becomes active and written
+    /// back on every mutation (arm / monitor update / fire / clear), so the
+    /// next instance to become active resumes from the same baseline.
+    pub alarms: AlarmStore,
 }
 
 impl Default for AppState {
@@ -184,6 +190,7 @@ impl Default for AppState {
             click_map: ClickMap::default(),
             widgets: HashMap::new(),
             last_click_run: HashMap::new(),
+            alarms: AlarmStore::default(),
         }
     }
 }

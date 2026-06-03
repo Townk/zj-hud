@@ -13,6 +13,9 @@ pub const TAB_PROCESS: &str = "\u{F070E}"; // md_run
 pub const TAB_ICON: &str = "\u{F04E9}"; // md_tab
 pub const ZOOM_ICON: &str = "\u{F05AF}"; // md_magnify_plus_outline
 pub const INPUT_SYNC_ICON: &str = "\u{F43C}"; // input sync (synced panes)
+pub const ALARM_ARMED: &str = "\u{F0A2}"; // alarm armed, watching a pane
+pub const ALARM_FIRED_IDLE: &str = "\u{F00A0}"; // idle alarm tripped (output stopped)
+pub const ALARM_FIRED_ACTIVITY: &str = "\u{F009E}"; // activity alarm tripped (new output)
 
 // Mode icons
 pub const MODE_LOCKED: &str = "\u{F033E}"; // md_lock

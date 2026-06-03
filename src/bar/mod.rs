@@ -10,12 +10,13 @@ pub mod state;
 pub mod status;
 pub mod tabs;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use zellij_tile::prelude::*;
 
+use crate::shared::alarms::{self, AlarmEntry, AlarmKind};
 use crate::shared::state as shared_state;
 use crate::shared::state::SharedState;
 use crate::PLUGIN_PERMISSIONS;
@@ -26,7 +27,7 @@ use status::system;
 
 /// How often the background timer fires. Kept fast (1 s) because Zellij does
 /// not emit `PaneUpdate` when only a terminal's OSC window title changes, so
-/// `system::refresh_focused_pane_title` has to poll. Other timer-driven work
+/// `system::refresh_all_tab_titles` has to poll. Other timer-driven work
 /// (widget refresh, Ghostty fullscreen probe) gates itself behind its own TTL,
 /// so faster ticks don't increase the rate of those underlying commands.
 const TIMER_INTERVAL: f64 = 1.0;
@@ -42,6 +43,11 @@ const CLICK_RUN_DEBOUNCE: Duration = Duration::from_millis(100);
 // Context keys for RunCommandResult routing.
 const CTX_PROJECT_ROOT: &str = "project_root";
 const CTX_PROJECT_CWD: &str = "project_cwd";
+
+/// Pipe a user keybind targets (via the `MessagePlugin` action) to arm or
+/// clear a background-tab alarm on the active tab's focused terminal pane. The
+/// payload selects the action: `idle`, `activity`, or `clear`.
+pub const ALARM_PIPE: &str = "zj_hud_alarm";
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -105,6 +111,7 @@ impl ZellijPlugin for State {
                 self.app.got_permissions = true;
                 set_selectable(false);
                 set_timeout(1.0);
+                self.load_alarms();
                 system::maybe_refresh_ghostty_fullscreen(&mut self.app);
                 system::maybe_refresh_tz_offset(&mut self.app);
                 system::maybe_refresh_widgets(&mut self.app, &self.config);
@@ -152,6 +159,9 @@ impl ZellijPlugin for State {
 
 impl State {
     pub(crate) fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
+        if pipe_message.name == ALARM_PIPE {
+            return self.handle_alarm_pipe(pipe_message.payload.as_deref());
+        }
         if pipe_message.name != shared_state::SYNC_PIPE {
             return false;
         }
@@ -195,6 +205,9 @@ impl State {
                     self.active_tab_id = Some(active.tab_id);
                 }
                 self.sync_from_shared_state();
+                if self.is_active_instance() {
+                    self.clear_fired_in_active_tab();
+                }
                 self.app.dirty = true;
             }
             Event::SessionUpdate(sessions, _) => {
@@ -239,6 +252,9 @@ impl State {
                 }
                 self.app.panes = manifest.panes;
                 self.app.rebuild_interesting_panes();
+                if self.is_active_instance() {
+                    self.prune_alarms();
+                }
                 self.sync_from_shared_state();
                 self.app.dirty = true;
             }
@@ -247,6 +263,11 @@ impl State {
                 self.zellij_visible = is_visible;
                 if is_visible {
                     self.sync_from_shared_state();
+                    // This instance just became active: adopt the latest alarm
+                    // store (left by the previously-active instance) and clear
+                    // any fired alarm on the tab the user just switched into.
+                    self.load_alarms();
+                    self.clear_fired_in_active_tab();
                 } else {
                     self.clear_local_mode_indicator();
                 }
@@ -287,7 +308,14 @@ impl State {
                 system::maybe_refresh_ghostty_fullscreen(&mut self.app);
                 system::maybe_refresh_tz_offset(&mut self.app);
                 system::maybe_refresh_widgets(&mut self.app, &self.config);
-                system::refresh_focused_pane_title(&mut self.app);
+                system::refresh_all_tab_titles(&mut self.app);
+                // Only the active instance monitors alarms: it holds every
+                // tab's panes and is the store's sole writer, so a background
+                // instance can never double-fire a notification.
+                if self.is_active_instance() && system::monitor_alarms(&mut self.app, &self.config)
+                {
+                    self.persist_alarms();
+                }
                 set_timeout(TIMER_INTERVAL);
             }
             Event::Mouse(mouse_event) => {
@@ -528,6 +556,108 @@ impl State {
 
     fn shared_state_path(&self) -> String {
         shared_state::state_path(get_plugin_ids().zellij_pid, &self.app.session_name)
+    }
+
+    // ─── Alarms ─────────────────────────────────────────────────────────────
+
+    fn alarm_state_path(&self) -> String {
+        alarms::path(get_plugin_ids().zellij_pid, &self.app.session_name)
+    }
+
+    /// Load the alarm store from disk into memory. Called when this instance
+    /// becomes the active one, so it picks up arms/baselines left by whichever
+    /// instance was active before.
+    fn load_alarms(&mut self) {
+        self.app.alarms = alarms::read_from(self.alarm_state_path()).unwrap_or_default();
+    }
+
+    fn persist_alarms(&self) {
+        let _ = alarms::write_to(self.alarm_state_path(), &self.app.alarms);
+    }
+
+    /// Arm/clear an alarm on the active tab's focused terminal pane. Only the
+    /// active instance acts (its `active_tab` is the tab the user is looking
+    /// at, and its in-memory store is authoritative).
+    fn handle_alarm_pipe(&mut self, payload: Option<&str>) -> bool {
+        if !self.is_active_instance() {
+            return false;
+        }
+        let action = payload.map(str::trim).unwrap_or("");
+        let Some(pane_id) = self
+            .app
+            .focused_pane_for_tab(self.active_tab)
+            .map(|pane| pane.id)
+        else {
+            return false;
+        };
+        match action {
+            "idle" | "activity" => {
+                let kind = if action == "idle" {
+                    AlarmKind::Idle
+                } else {
+                    AlarmKind::Activity
+                };
+                let now = system::now_epoch();
+                let hash = system::pane_content_hash(pane_id).unwrap_or(0);
+                self.app
+                    .alarms
+                    .entries
+                    .insert(pane_id, AlarmEntry::armed(kind, now, hash));
+            }
+            "clear" => {
+                self.app.alarms.entries.remove(&pane_id);
+            }
+            _ => return false,
+        }
+        self.persist_alarms();
+        self.app.dirty = true;
+        true
+    }
+
+    /// Drop alarm entries whose pane no longer exists (closed panes). Active
+    /// instance only — it owns the store writes.
+    fn prune_alarms(&mut self) {
+        if self.app.alarms.entries.is_empty() {
+            return;
+        }
+        let live: HashSet<u32> = self
+            .app
+            .panes
+            .values()
+            .flatten()
+            .filter(|pane| !pane.is_plugin)
+            .map(|pane| pane.id)
+            .collect();
+        let before = self.app.alarms.entries.len();
+        self.app.alarms.entries.retain(|id, _| live.contains(id));
+        if self.app.alarms.entries.len() != before {
+            self.persist_alarms();
+            self.app.dirty = true;
+        }
+    }
+
+    /// Acknowledge fired alarms on the now-active tab: switching into the tab
+    /// is the "visit" that clears its bell.
+    fn clear_fired_in_active_tab(&mut self) {
+        if self.app.alarms.entries.is_empty() {
+            return;
+        }
+        let pane_ids: HashSet<u32> = self
+            .app
+            .panes_for_tab(self.active_tab)
+            .iter()
+            .filter(|pane| !pane.is_plugin)
+            .map(|pane| pane.id)
+            .collect();
+        let before = self.app.alarms.entries.len();
+        self.app
+            .alarms
+            .entries
+            .retain(|id, entry| !(entry.fired && pane_ids.contains(id)));
+        if self.app.alarms.entries.len() != before {
+            self.persist_alarms();
+            self.app.dirty = true;
+        }
     }
 
     /// The most recent full state with this instance's identity stamped on it.

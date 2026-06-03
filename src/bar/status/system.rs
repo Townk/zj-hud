@@ -4,6 +4,7 @@ use zellij_tile::prelude::*;
 
 use crate::bar::config::{Config, InfoWidget, Visibility};
 use crate::bar::state::{AppState, WidgetSample};
+use crate::shared::alarms::{self, AlarmKind, AlarmOutcome};
 
 pub const CTX_KEY: &str = "source";
 pub const CTX_GHOSTTY_FULLSCREEN: &str = "ghostty_fullscreen";
@@ -181,34 +182,168 @@ pub fn refresh_pane_title_by_id(state: &mut AppState, pane_id: u32) {
     }
 }
 
-/// Backstop poll of the focused pane's title.
+/// Backstop poll of every tab's focused-pane title.
 ///
 /// `PaneRenderReport` only fires when a pane's *viewport* changes, but
 /// Zellij's OSC 0/2 handler in `grid.rs:osc_dispatch` updates `grid.title`
 /// without calling `mark_for_rerender`. A script that only emits
 /// `\e]2;newtitle\a` and no visible output therefore never triggers a render
-/// report. This polling path catches that edge case on a slow cadence.
-pub fn refresh_focused_pane_title(state: &mut AppState) {
-    let Ok((tab_position, pane_id)) = get_focused_pane_info() else {
-        return;
-    };
-    let PaneId::Terminal(_) = pane_id else {
-        return;
-    };
-    let Some(fresh) = get_pane_info(pane_id) else {
-        return;
-    };
-
-    let Some(panes) = state.panes.get_mut(&tab_position) else {
-        return;
-    };
-    let Some(slot) = panes.iter_mut().find(|p| p.id == fresh.id && !p.is_plugin) else {
-        return;
-    };
-    if slot.title != fresh.title {
-        slot.title = fresh.title;
-        state.dirty = true;
+/// report. On top of that, the render report only ever covers the active
+/// tab's panes, so a background tab whose title changes (e.g. a Cursor agent
+/// updating its window title while you work in another tab) is never
+/// re-read. We therefore poll the focused terminal pane of *every* tab here,
+/// patching cached titles that drifted. `get_pane_info` is keyed by pane id
+/// and works cross-tab, so this needs no per-tab focus. Worst case it does one
+/// `get_pane_info` per open tab per slow tick.
+pub fn refresh_all_tab_titles(state: &mut AppState) {
+    let tab_positions: Vec<usize> = state.panes.keys().copied().collect();
+    for tab_position in tab_positions {
+        let Some(pane_id) = state.focused_pane_for_tab(tab_position).map(|pane| pane.id) else {
+            continue;
+        };
+        let Some(fresh) = get_pane_info(PaneId::Terminal(pane_id)) else {
+            continue;
+        };
+        let Some(panes) = state.panes.get_mut(&tab_position) else {
+            continue;
+        };
+        let Some(slot) = panes.iter_mut().find(|p| p.id == fresh.id && !p.is_plugin) else {
+            continue;
+        };
+        if slot.title != fresh.title {
+            slot.title = fresh.title;
+            state.dirty = true;
+        }
     }
+}
+
+// ─── Alarms ───────────────────────────────────────────────────────────────────
+
+/// Current wall-clock time in epoch seconds.
+///
+/// Zellij plugins run in a WASI sandbox where `chrono::Local` falls back to
+/// UTC, but `chrono::Utc::now()` works — and for a monotonic-ish epoch delta
+/// that is all the idle countdown needs.
+pub fn now_epoch() -> u64 {
+    chrono::Utc::now().timestamp().max(0) as u64
+}
+
+/// Deterministic fingerprint of a pane's visible viewport. Uses
+/// `DefaultHasher` (fixed keys, no per-process randomization) so the value is
+/// stable across bar instances — essential for the idle baseline to survive a
+/// tab switch handing monitoring to a different instance.
+fn hash_viewport(viewport: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for line in viewport {
+        line.hash(&mut hasher);
+        0u8.hash(&mut hasher); // line boundary, so [\"ab\"] and [\"a\",\"b\"] differ
+    }
+    hasher.finish()
+}
+
+/// Sample a terminal pane's visible viewport and fingerprint it. `None` when
+/// the pane could not be read (e.g. it just closed). Works cross-tab — the
+/// query is keyed by pane id, not by which tab is active.
+pub fn pane_content_hash(pane_id: u32) -> Option<u64> {
+    let contents = get_pane_scrollback(PaneId::Terminal(pane_id), false).ok()?;
+    Some(hash_viewport(&contents.viewport))
+}
+
+/// Sample every armed pane, evaluate its alarm, and fire notifications for any
+/// that tripped. Returns `true` if the in-memory store changed (so the caller
+/// persists it). Run only by the active instance — it holds the full manifest
+/// for every tab and is the single writer of the store.
+pub fn monitor_alarms(state: &mut AppState, config: &Config) -> bool {
+    if state.alarms.entries.is_empty() {
+        return false;
+    }
+    let now = now_epoch();
+    let idle_timeout = config.alarms.idle_timeout.as_secs();
+    let pane_ids: Vec<u32> = state.alarms.entries.keys().copied().collect();
+    let mut changed = false;
+
+    for pane_id in pane_ids {
+        let Some(hash) = pane_content_hash(pane_id) else {
+            continue;
+        };
+        let outcome = match state.alarms.entries.get(&pane_id) {
+            Some(entry) => alarms::evaluate(entry, now, hash, idle_timeout),
+            None => continue,
+        };
+        match outcome {
+            AlarmOutcome::None => {}
+            AlarmOutcome::UpdateBaseline => {
+                if let Some(entry) = state.alarms.entries.get_mut(&pane_id) {
+                    entry.content_hash = hash;
+                    entry.last_change_epoch = now;
+                    changed = true;
+                }
+            }
+            AlarmOutcome::Fire => {
+                fire_alarm_notification(state, config, pane_id);
+                if let Some(entry) = state.alarms.entries.get_mut(&pane_id) {
+                    entry.fired = true;
+                    entry.content_hash = hash;
+                    entry.last_change_epoch = now;
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Resolve a pane to a `(tab label, pane title)` pair for the notification text.
+fn locate_pane(state: &AppState, pane_id: u32) -> (String, String) {
+    for (tab_position, panes) in &state.panes {
+        if let Some(pane) = panes.iter().find(|p| p.id == pane_id && !p.is_plugin) {
+            let tab_label = state
+                .tabs
+                .iter()
+                .find(|t| t.position == *tab_position)
+                .map(|t| t.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("Tab {}", tab_position + 1));
+            return (tab_label, pane.title.clone());
+        }
+    }
+    (format!("pane {pane_id}"), String::new())
+}
+
+fn fire_alarm_notification(state: &AppState, config: &Config, pane_id: u32) {
+    let kind = state.alarms.entries.get(&pane_id).map(|entry| entry.kind);
+    let reason = match kind {
+        Some(AlarmKind::Idle) => "output stopped",
+        Some(AlarmKind::Activity) => "new output",
+        None => "alarm",
+    };
+    let (tab_label, pane_title) = locate_pane(state, pane_id);
+    let subject = if pane_title.trim().is_empty() {
+        tab_label.clone()
+    } else {
+        pane_title
+    };
+    let title = format!("zj-hud: {tab_label}");
+    let message = format!("{subject} - {reason}");
+    let group = format!("zj-hud-{pane_id}");
+
+    let argv: Vec<String> = config
+        .alarms
+        .notify_command
+        .iter()
+        .map(|token| {
+            token
+                .replace("{title}", &title)
+                .replace("{message}", &message)
+                .replace("{group}", &group)
+        })
+        .collect();
+    if argv.is_empty() {
+        return;
+    }
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    run_command(&refs, BTreeMap::new());
 }
 
 // ─── User-defined widgets ─────────────────────────────────────────────────────
