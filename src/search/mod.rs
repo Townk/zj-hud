@@ -626,8 +626,7 @@ impl SearchPane {
     /// parity). Matching is exact and our config is just `role "search"`, so the
     /// pipe lands here rather than spawning a fresh instance.
     pub(crate) fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
-        if pipe_message.name != crate::shared::state::SEARCH_TOGGLE_PIPE
-            || !self.is_on_active_tab()
+        if pipe_message.name != crate::shared::state::SEARCH_TOGGLE_PIPE || !self.is_on_active_tab()
         {
             return false;
         }

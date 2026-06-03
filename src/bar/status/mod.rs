@@ -131,8 +131,9 @@ pub fn search_hint_segment(
     is_last: bool,
 ) -> Segment {
     let trailing = if is_last { "" } else { " " };
-    let plain =
-        format!(" {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap{trailing}");
+    let plain = format!(
+        " {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap{trailing}"
+    );
     let width = UnicodeWidthStr::width(plain.as_str());
 
     let on = HINT_GLYPH_ON.to_ansi_fg();
