@@ -49,6 +49,7 @@ pub struct IconLibrary {
     pub tab_process: String,
     pub tab_icon: String,
     pub zoom_icon: String,
+    pub input_sync_icon: String,
     pub calendar: String,
 }
 
@@ -60,6 +61,7 @@ impl Default for IconLibrary {
             tab_process: icons::TAB_PROCESS.to_string(),
             tab_icon: icons::TAB_ICON.to_string(),
             zoom_icon: icons::ZOOM_ICON.to_string(),
+            input_sync_icon: icons::INPUT_SYNC_ICON.to_string(),
             calendar: icons::CALENDAR.to_string(),
         }
     }

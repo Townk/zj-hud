@@ -212,6 +212,15 @@ impl AppState {
             .any(|p| p.is_fullscreen && !p.is_plugin)
     }
 
+    /// Whether input sent to this tab is synced to all of its panes.
+    pub fn tab_sync_active(&self, tab_position: usize) -> bool {
+        self.tabs
+            .iter()
+            .find(|t| t.position == tab_position)
+            .map(|t| t.is_sync_panes_active)
+            .unwrap_or(false)
+    }
+
     /// Recompute `interesting_panes` to contain the focused terminal pane of
     /// each tab. Called whenever pane/tab membership might have changed so the
     /// `PaneRenderReport` filter stays in sync with the current layout.

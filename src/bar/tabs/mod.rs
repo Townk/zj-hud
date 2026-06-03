@@ -40,11 +40,13 @@ pub fn compose_tab_title(
 
     let body = compose_body(tab_position, tab_name, state, config);
 
-    let extra_icons = if state.any_pane_zoomed(tab_position) {
-        format!(" {}", config.icons.zoom_icon)
-    } else {
-        String::new()
-    };
+    let mut extra_icons = String::new();
+    if state.any_pane_zoomed(tab_position) {
+        extra_icons.push_str(&format!(" {}", config.icons.zoom_icon));
+    }
+    if state.tab_sync_active(tab_position) {
+        extra_icons.push_str(&format!(" {}", config.icons.input_sync_icon));
+    }
 
     TabTitle {
         index_str,
@@ -475,6 +477,73 @@ mod tests {
             "rendered title should end with ' <zoom_icon>', got {:?}",
             rendered
         );
+    }
+
+    #[test]
+    fn input_sync_icon_shown_when_tab_sync_active() {
+        let mut state = AppState::default();
+        state.tabs.push(zellij_tile::prelude::TabInfo {
+            position: 0,
+            is_sync_panes_active: true,
+            ..Default::default()
+        });
+        state.panes.insert(
+            0,
+            vec![zellij_tile::prelude::PaneInfo {
+                id: 1,
+                is_focused: true,
+                title: "agent".to_string(),
+                ..Default::default()
+            }],
+        );
+        state.pane_cache.cmd.insert(1, vec!["agent".to_string()]);
+
+        let config = Config::default();
+        let title = compose_tab_title(0, "Tab #1", &state, &config);
+
+        assert!(title.extra_icons.contains(&config.icons.input_sync_icon));
+
+        let rendered = render_tab_title(&title, 40, 0.4);
+        let expected_suffix = format!(" {}", config.icons.input_sync_icon);
+        assert!(
+            rendered.ends_with(&expected_suffix),
+            "rendered title should end with ' <input_sync_icon>', got {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn zoom_and_input_sync_icons_render_together() {
+        let mut state = AppState::default();
+        state.tabs.push(zellij_tile::prelude::TabInfo {
+            position: 0,
+            is_sync_panes_active: true,
+            ..Default::default()
+        });
+        state.panes.insert(
+            0,
+            vec![zellij_tile::prelude::PaneInfo {
+                id: 1,
+                is_focused: true,
+                title: "agent".to_string(),
+                is_fullscreen: true,
+                ..Default::default()
+            }],
+        );
+        state.pane_cache.cmd.insert(1, vec!["agent".to_string()]);
+
+        let config = Config::default();
+        let title = compose_tab_title(0, "Tab #1", &state, &config);
+
+        assert!(title.extra_icons.contains(&config.icons.zoom_icon));
+        assert!(title.extra_icons.contains(&config.icons.input_sync_icon));
+        // Zoom indicator precedes the input-sync indicator.
+        let zoom_at = title.extra_icons.find(&config.icons.zoom_icon).unwrap();
+        let sync_at = title
+            .extra_icons
+            .find(&config.icons.input_sync_icon)
+            .unwrap();
+        assert!(zoom_at < sync_at);
     }
 
     #[test]
