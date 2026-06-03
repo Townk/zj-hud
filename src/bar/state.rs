@@ -123,6 +123,11 @@ pub struct AppState {
     pub search_case_sensitive: bool,
     pub search_whole_word: bool,
     pub search_wrap: bool,
+    /// Floating rename dialog state. Like search, the rename dialog holds the
+    /// client in `Normal` while it intercepts input, so the bar reads this mirror
+    /// to keep showing the active rename mode.
+    pub rename_active: bool,
+    pub rename_mode: InputMode,
     pub tabs: Vec<TabInfo>,
     pub panes: HashMap<usize, Vec<PaneInfo>>,
     /// Terminal pane IDs we actually care about for `PaneRenderReport` events
@@ -172,6 +177,8 @@ impl Default for AppState {
             search_case_sensitive: false,
             search_whole_word: false,
             search_wrap: true,
+            rename_active: false,
+            rename_mode: InputMode::RenameTab,
             tabs: Vec::new(),
             panes: HashMap::new(),
             interesting_panes: HashSet::new(),

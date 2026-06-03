@@ -15,6 +15,7 @@
 //!   search dialog, so those roles need no geometry config of their own.
 //! - `search_active` / `search_case_sensitive` / `search_whole_word` /
 //!   `search_wrap` — the **Search** role.
+//! - `rename_active` / `rename_mode` — the **Rename** role.
 //! - `suppressed` / `page` — the **WhichKey** role.
 
 use std::collections::BTreeMap;
@@ -28,7 +29,7 @@ use zellij_tile::prelude::InputMode;
 /// Bumped whenever the on-disk schema changes incompatibly. Old files that fail
 /// to parse fall back to `Default` in the readers, and the per-field
 /// `#[serde(default)]` lets a partial (older) file still deserialize.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Broadcast pipe name used by every role to push a fresh `SharedState` to all
 /// instances of the plugin URL. The single channel (rather than per-purpose
@@ -78,6 +79,13 @@ pub struct SharedState {
     pub search_whole_word: bool,
     #[serde(default = "default_true")]
     pub search_wrap: bool,
+    /// Floating rename dialog state, owned by the **Rename** role. The dialog
+    /// holds the client in `Normal` while intercepting text input, so the bar
+    /// uses this to keep rendering the requested rename mode.
+    #[serde(default)]
+    pub rename_active: bool,
+    #[serde(default)]
+    pub rename_mode: String,
     /// Mode-name -> display style, owned by the active Bar (see module docs).
     #[serde(default)]
     pub palette: BTreeMap<String, ModePalette>,
@@ -122,6 +130,8 @@ impl Default for SharedState {
             search_case_sensitive: false,
             search_whole_word: false,
             search_wrap: true,
+            rename_active: false,
+            rename_mode: mode_name(InputMode::RenameTab).to_string(),
             palette: BTreeMap::new(),
             which_key_config: String::new(),
             search_config: String::new(),

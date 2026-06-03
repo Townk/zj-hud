@@ -240,13 +240,13 @@ fn render_tabs(
 }
 
 pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> RenderedSide {
-    // Drive the Search indicator. While the floating search dialog is open the
-    // client is held in `Normal` (so `intercept_key_presses` reaches us), so we
-    // rely on the explicit `search_active` flag pushed by the search pane rather
-    // than the client mode. We also still collapse `EnterSearch` → `Search` for
-    // the brief native transition and for `n`/`N` navigation after submit.
+    // Drive floating-dialog indicators. Search and Rename hold the client in
+    // `Normal` while they intercept text input, so the visible mode can come
+    // from shared dialog state instead of the raw client mode.
     let effective_mode = if state.search_active || state.mode == InputMode::EnterSearch {
         InputMode::Search
+    } else if state.rename_active {
+        state.rename_mode
     } else {
         state.mode
     };

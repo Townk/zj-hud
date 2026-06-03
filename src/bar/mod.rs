@@ -74,8 +74,8 @@ pub(crate) struct State {
     /// shared `backstack` mode-trail (consumed by the WhichKey role).
     base_mode: Option<InputMode>,
     /// Most recent full `SharedState` this instance has seen or written. Lets
-    /// the Bar preserve fields it does not own (`search_active`, `suppressed`,
-    /// `page`) when it republishes a mode change.
+    /// the Bar preserve fields it does not own (`search_active`,
+    /// `rename_active`, `suppressed`, `page`) when it republishes a mode change.
     last_shared: SharedState,
 }
 
@@ -431,15 +431,15 @@ impl State {
     }
 
     fn handle_mode_update(&mut self, mode: InputMode) {
-        // While the floating search dialog is up it parks the client in `Normal`
+        // While a floating input dialog is up it parks the client in `Normal`
         // to grab keys (and `SearchInput` re-asserts `Normal`); none of that is a
         // real mode change. Freeze the mode-trail (publish nothing) so the
         // which-key breadcrumb survives the excursion and is correct once the
-        // user submits into `Search`. The Search role writes `search_active` to
-        // the state file *before* flipping the mode, so this fresh disk read is
+        // dialog exits. Dialog roles write their active flag to the state file
+        // *before* flipping the mode, so this fresh disk read is
         // race-free — the cached/pipe-synced copy can lag behind the ModeUpdate.
-        // The Search indicator still lights via the synced `search_active` flag.
-        if self.search_dialog_active() {
+        // Indicators still light via the synced dialog-active fields.
+        if self.dialog_active() {
             // A genuine mode the user passed through on the way into search
             // (e.g. `Scroll` from `Alt+w l /`) may still be sitting in
             // `pending_mode`, debounced and not yet published. Commit it to the
@@ -447,7 +447,9 @@ impl State {
             // user submits into `Search`; drop the search-entry modes
             // themselves (`EnterSearch`/`Search`), which collapse into the
             // dialog excursion rather than belonging in the trail.
-            self.flush_pending_mode_skipping_search();
+            if self.search_dialog_active() {
+                self.flush_pending_mode_skipping_search();
+            }
             return;
         }
         if mode == InputMode::Normal {
@@ -662,7 +664,7 @@ impl State {
 
     /// The most recent full state with this instance's identity stamped on it.
     /// Built from `last_shared` so fields the Bar doesn't own (`search_active`,
-    /// `suppressed`, `page`) are preserved across re-broadcasts.
+    /// `rename_active`, `suppressed`, `page`) are preserved across re-broadcasts.
     fn snapshot_shared_state(&self) -> SharedState {
         let mut snapshot = self.last_shared.clone();
         snapshot.schema_version = shared_state::SCHEMA_VERSION;
@@ -708,6 +710,12 @@ impl State {
             .unwrap_or(false)
     }
 
+    fn dialog_active(&self) -> bool {
+        shared_state::read_state_from(self.shared_state_path())
+            .map(|shared| shared.search_active || shared.rename_active)
+            .unwrap_or(false)
+    }
+
     fn apply_shared_state(&mut self, shared: &SharedState) -> bool {
         if shared.generation < self.shared_generation {
             return false;
@@ -737,6 +745,14 @@ impl State {
             self.app.search_case_sensitive = shared.search_case_sensitive;
             self.app.search_whole_word = shared.search_whole_word;
             self.app.search_wrap = shared.search_wrap;
+            changed = true;
+        }
+        let rename_mode = shared_state::str_to_mode(shared.rename_mode.as_str())
+            .filter(|mode| matches!(mode, InputMode::RenameTab | InputMode::RenamePane))
+            .unwrap_or(InputMode::RenameTab);
+        if self.app.rename_active != shared.rename_active || self.app.rename_mode != rename_mode {
+            self.app.rename_active = shared.rename_active;
+            self.app.rename_mode = rename_mode;
             changed = true;
         }
         self.shared_generation = shared.generation;
@@ -829,6 +845,7 @@ impl State {
             .filter(|pane| {
                 pane.is_plugin
                     && pane.id != my_id
+                    && pane.title != crate::rename::PANE_TITLE
                     && pane.title != crate::search::PANE_TITLE
                     && pane.title != crate::whichkey::PANE_TITLE
                     && pane

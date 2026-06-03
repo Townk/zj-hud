@@ -1,4 +1,5 @@
 mod bar;
+mod rename;
 mod search;
 mod shared;
 mod whichkey;
@@ -7,6 +8,7 @@ use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
 
 use bar::State;
+use rename::RenamePane;
 use search::SearchPane;
 use whichkey::WhichKeyPane;
 
@@ -26,7 +28,8 @@ pub extern "C" fn host_run_plugin_command() {}
 /// configuration key:
 ///
 /// - the status bar (default),
-/// - a floating "visual search" input pane (`role = "search"`), and
+/// - a floating "visual search" input pane (`role = "search"`),
+/// - a floating rename input pane (`role = "rename"`), and
 /// - a per-tab which-key style keybinding panel (`role = "whichkey"`).
 ///
 /// All are the same `.wasm`; Zellij keys plugin instances by (url,
@@ -35,6 +38,7 @@ pub extern "C" fn host_run_plugin_command() {}
 /// `shared_state::SYNC_PIPE` broadcast.
 enum Plugin {
     Bar(Box<State>),
+    Rename(Box<RenamePane>),
     Search(Box<SearchPane>),
     WhichKey(Box<WhichKeyPane>),
 }
@@ -48,12 +52,14 @@ impl Default for Plugin {
 impl ZellijPlugin for Plugin {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         match configuration.get("role").map(String::as_str) {
+            Some("rename") => *self = Plugin::Rename(Box::default()),
             Some("search") => *self = Plugin::Search(Box::default()),
             Some("whichkey") => *self = Plugin::WhichKey(Box::default()),
             _ => {}
         }
         match self {
             Plugin::Bar(state) => state.load(configuration),
+            Plugin::Rename(rename) => rename.load(configuration),
             Plugin::Search(search) => search.load(configuration),
             Plugin::WhichKey(which_key) => which_key.load(configuration),
         }
@@ -62,6 +68,7 @@ impl ZellijPlugin for Plugin {
     fn update(&mut self, event: Event) -> bool {
         match self {
             Plugin::Bar(state) => state.update(event),
+            Plugin::Rename(rename) => rename.update(event),
             Plugin::Search(search) => search.update(event),
             Plugin::WhichKey(which_key) => which_key.update(event),
         }
@@ -70,6 +77,7 @@ impl ZellijPlugin for Plugin {
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         match self {
             Plugin::Bar(state) => state.pipe(pipe_message),
+            Plugin::Rename(_) => false,
             Plugin::Search(search) => search.pipe(pipe_message),
             Plugin::WhichKey(which_key) => which_key.pipe(pipe_message),
         }
@@ -78,6 +86,7 @@ impl ZellijPlugin for Plugin {
     fn render(&mut self, rows: usize, cols: usize) {
         match self {
             Plugin::Bar(state) => state.render(rows, cols),
+            Plugin::Rename(rename) => rename.render(rows, cols),
             Plugin::Search(search) => search.render(rows, cols),
             Plugin::WhichKey(which_key) => which_key.render(rows, cols),
         }
