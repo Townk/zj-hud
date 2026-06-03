@@ -139,6 +139,7 @@ pub struct AppState {
     pub interesting_panes: HashSet<u32>,
     pub session_name: String,
     pub ghostty_fullscreen: CachedValue<bool>,
+    pub wezterm_fullscreen: CachedValue<bool>,
     /// Local-time UTC offset in seconds, sampled by shelling out to
     /// `date +%z` (see `system::maybe_refresh_tz_offset`). Zellij plugins
     /// run inside a WASI sandbox with no access to the host timezone
@@ -184,6 +185,7 @@ impl Default for AppState {
             interesting_panes: HashSet::new(),
             session_name: String::new(),
             ghostty_fullscreen: CachedValue::new(Duration::from_secs(2)),
+            wezterm_fullscreen: CachedValue::new(Duration::from_secs(2)),
             tz_offset: CachedValue::new(Duration::from_secs(30 * 60)),
             cols: 0,
             dirty: true,

@@ -28,7 +28,7 @@ use status::system;
 /// How often the background timer fires. Kept fast (1 s) because Zellij does
 /// not emit `PaneUpdate` when only a terminal's OSC window title changes, so
 /// `system::refresh_all_tab_titles` has to poll. Other timer-driven work
-/// (widget refresh, Ghostty fullscreen probe) gates itself behind its own TTL,
+/// (widget refresh, terminal fullscreen probes) gates itself behind its own TTL,
 /// so faster ticks don't increase the rate of those underlying commands.
 const TIMER_INTERVAL: f64 = 1.0;
 
@@ -113,6 +113,7 @@ impl ZellijPlugin for State {
                 set_timeout(1.0);
                 self.load_alarms();
                 system::maybe_refresh_ghostty_fullscreen(&mut self.app);
+                system::maybe_refresh_wezterm_fullscreen(&mut self.app);
                 system::maybe_refresh_tz_offset(&mut self.app);
                 system::maybe_refresh_widgets(&mut self.app, &self.config);
 
@@ -147,6 +148,7 @@ impl ZellijPlugin for State {
         self.app.cols = cols;
         if self.app.got_permissions && cols_changed {
             system::refresh_ghostty_fullscreen_now(&mut self.app);
+            system::refresh_wezterm_fullscreen_now(&mut self.app);
         }
         let bar = render::render_bar(&self.app, &self.config, cols);
         print!("{}", bar.text);
@@ -306,6 +308,7 @@ impl State {
                     return;
                 }
                 system::maybe_refresh_ghostty_fullscreen(&mut self.app);
+                system::maybe_refresh_wezterm_fullscreen(&mut self.app);
                 system::maybe_refresh_tz_offset(&mut self.app);
                 system::maybe_refresh_widgets(&mut self.app, &self.config);
                 system::refresh_all_tab_titles(&mut self.app);

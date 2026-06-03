@@ -77,7 +77,7 @@ impl Default for IconLibrary {
 
 /// Visibility gating shared by `date_time`, `system_info`, and individual
 /// widgets. `Fullscreen` defers to the existing `should_show_system_segments`
-/// predicate (zoomed pane / non-graphical / Ghostty fullscreen / cols ≥ N).
+/// predicate (zoomed pane / non-graphical / terminal fullscreen / cols ≥ N).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Visibility {
     Always,

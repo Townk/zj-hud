@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zellij_tile::prelude::*;
 
@@ -11,6 +12,8 @@ pub const CTX_GHOSTTY_FULLSCREEN: &str = "ghostty_fullscreen";
 pub const CTX_TZ_OFFSET: &str = "tz_offset";
 pub const CTX_WIDGET: &str = "widget";
 pub const CTX_WIDGET_ID: &str = "widget_id";
+
+const WEZTERM_FULLSCREEN_STATE: &str = "wezterm/fullscreen_state";
 
 const GHOSTTY_FULLSCREEN_SCRIPT: &str = r#"
 tell application "System Events"
@@ -59,6 +62,9 @@ pub fn should_show_system_segments(
     if is_running_in_ghostty() {
         return state.ghostty_fullscreen.value.unwrap_or(false);
     }
+    if is_running_in_wezterm() {
+        return state.wezterm_fullscreen.value.unwrap_or(false);
+    }
 
     cols >= fullscreen_min_cols
 }
@@ -91,6 +97,14 @@ pub fn refresh_ghostty_fullscreen_now(state: &mut AppState) {
     request_ghostty_fullscreen(state, true);
 }
 
+pub fn maybe_refresh_wezterm_fullscreen(state: &mut AppState) {
+    refresh_wezterm_fullscreen(state, false);
+}
+
+pub fn refresh_wezterm_fullscreen_now(state: &mut AppState) {
+    refresh_wezterm_fullscreen(state, true);
+}
+
 fn request_ghostty_fullscreen(state: &mut AppState, force: bool) {
     if !is_running_in_ghostty() || state.ghostty_fullscreen.in_flight {
         return;
@@ -106,9 +120,60 @@ fn request_ghostty_fullscreen(state: &mut AppState, force: bool) {
 }
 
 fn is_running_in_ghostty() -> bool {
+    term_program_is("ghostty")
+}
+
+fn is_running_in_wezterm() -> bool {
+    term_program_is("wezterm")
+}
+
+fn term_program_is(name: &str) -> bool {
     std::env::var("TERM_PROGRAM")
-        .map(|term| term.eq_ignore_ascii_case("ghostty"))
+        .map(|term| term.eq_ignore_ascii_case(name))
         .unwrap_or(false)
+}
+
+fn refresh_wezterm_fullscreen(state: &mut AppState, force: bool) {
+    if !is_running_in_wezterm() {
+        return;
+    }
+    if !force && !state.wezterm_fullscreen.is_expired() {
+        return;
+    }
+
+    for path in wezterm_fullscreen_state_paths(&state.home) {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(is_fullscreen) = parse_wezterm_fullscreen_output(&contents) {
+            state.wezterm_fullscreen.set(is_fullscreen);
+            return;
+        }
+    }
+    state.wezterm_fullscreen.mark_refreshed();
+}
+
+fn wezterm_fullscreen_state_paths(home: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(xdg_state_home) = std::env::var("XDG_STATE_HOME") {
+        paths.push(PathBuf::from(xdg_state_home).join(WEZTERM_FULLSCREEN_STATE));
+    }
+    paths.push(home.join(".local/state").join(WEZTERM_FULLSCREEN_STATE));
+
+    let host_paths = paths
+        .iter()
+        .filter_map(|path| host_visible_path(path))
+        .collect::<Vec<_>>();
+    paths.extend(host_paths);
+    paths
+}
+
+fn host_visible_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() || path.starts_with("/host") {
+        return None;
+    }
+    let without_root = path.strip_prefix("/").ok()?;
+    Some(Path::new("/host").join(without_root))
 }
 
 // ─── Timezone offset ──────────────────────────────────────────────────────────
@@ -441,9 +506,31 @@ fn parse_ghostty_fullscreen_output(output: &str) -> Option<bool> {
     }
 }
 
+fn parse_wezterm_fullscreen_output(output: &str) -> Option<bool> {
+    match output.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_term_program(value: &str, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("TERM_PROGRAM");
+        std::env::set_var("TERM_PROGRAM", value);
+        f();
+        match previous {
+            Some(previous) => std::env::set_var("TERM_PROGRAM", previous),
+            None => std::env::remove_var("TERM_PROGRAM"),
+        }
+    }
 
     #[test]
     fn parse_ghostty_fullscreen_states() {
@@ -466,27 +553,62 @@ mod tests {
 
     #[test]
     fn known_ghostty_windowed_state_overrides_column_fallback() {
-        std::env::set_var("TERM_PROGRAM", "ghostty");
-        let mut state = AppState {
-            got_permissions: true,
-            ..Default::default()
-        };
-        state.ghostty_fullscreen.set(false);
+        with_term_program("ghostty", || {
+            let mut state = AppState {
+                got_permissions: true,
+                ..Default::default()
+            };
+            state.ghostty_fullscreen.set(false);
 
-        assert!(!should_show_system_segments(&state, 100, 120));
-        std::env::remove_var("TERM_PROGRAM");
+            assert!(!should_show_system_segments(&state, 100, 120));
+        });
     }
 
     #[test]
     fn unknown_ghostty_state_stays_hidden() {
-        std::env::set_var("TERM_PROGRAM", "ghostty");
-        let state = AppState {
-            got_permissions: true,
-            ..Default::default()
-        };
+        with_term_program("ghostty", || {
+            let state = AppState {
+                got_permissions: true,
+                ..Default::default()
+            };
 
-        assert!(!should_show_system_segments(&state, 100, 120));
-        std::env::remove_var("TERM_PROGRAM");
+            assert!(!should_show_system_segments(&state, 100, 120));
+        });
+    }
+
+    #[test]
+    fn parse_wezterm_fullscreen_states() {
+        assert_eq!(parse_wezterm_fullscreen_output("true\n"), Some(true));
+        assert_eq!(parse_wezterm_fullscreen_output("false"), Some(false));
+        assert_eq!(parse_wezterm_fullscreen_output("TRUE"), None);
+        assert_eq!(parse_wezterm_fullscreen_output("bad"), None);
+    }
+
+    #[test]
+    fn known_wezterm_state_overrides_column_fallback() {
+        with_term_program("WezTerm", || {
+            let mut state = AppState {
+                got_permissions: true,
+                ..Default::default()
+            };
+            state.wezterm_fullscreen.set(false);
+            assert!(!should_show_system_segments(&state, 100, 120));
+
+            state.wezterm_fullscreen.set(true);
+            assert!(should_show_system_segments(&state, 100, 80));
+        });
+    }
+
+    #[test]
+    fn wezterm_state_paths_include_host_mount() {
+        let paths = wezterm_fullscreen_state_paths(Path::new("/Users/me"));
+
+        assert!(paths
+            .iter()
+            .any(|path| path == Path::new("/Users/me/.local/state/wezterm/fullscreen_state")));
+        assert!(paths
+            .iter()
+            .any(|path| path == Path::new("/host/Users/me/.local/state/wezterm/fullscreen_state")));
     }
 
     // ── parse_tz_offset ────────────────────────────────────────────────────
