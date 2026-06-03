@@ -138,6 +138,7 @@ pub struct AppState {
     /// open tab.
     pub interesting_panes: HashSet<u32>,
     pub session_name: String,
+    pub terminal_fullscreen: CachedValue<bool>,
     pub ghostty_fullscreen: CachedValue<bool>,
     pub wezterm_fullscreen: CachedValue<bool>,
     /// Local-time UTC offset in seconds, sampled by shelling out to
@@ -184,8 +185,9 @@ impl Default for AppState {
             panes: HashMap::new(),
             interesting_panes: HashSet::new(),
             session_name: String::new(),
+            terminal_fullscreen: CachedValue::new(Duration::from_secs(60 * 60)),
             ghostty_fullscreen: CachedValue::new(Duration::from_secs(2)),
-            wezterm_fullscreen: CachedValue::new(Duration::from_secs(2)),
+            wezterm_fullscreen: CachedValue::new(Duration::from_secs(1)),
             tz_offset: CachedValue::new(Duration::from_secs(30 * 60)),
             cols: 0,
             dirty: true,

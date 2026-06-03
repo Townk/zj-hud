@@ -180,6 +180,8 @@ pub struct Config {
     pub tab_truncation_point: f32,
     pub tab_hide_single: bool,
     pub fullscreen_min_cols: usize,
+    pub fullscreen_command: Option<String>,
+    pub fullscreen_initial_state: bool,
     pub default_session_name: String,
     pub project_markers: Vec<String>,
     pub mode_styles: Vec<(InputMode, ModeStyle)>,
@@ -331,6 +333,8 @@ impl Default for Config {
             tab_truncation_point: DEFAULT_TRUNCATION_POINT,
             tab_hide_single: false,
             fullscreen_min_cols: DEFAULT_FULLSCREEN_MIN_COLS,
+            fullscreen_command: None,
+            fullscreen_initial_state: false,
             default_session_name: DEFAULT_SESSION_NAME.to_string(),
             project_markers: DEFAULT_PROJECT_MARKERS
                 .iter()
@@ -385,6 +389,15 @@ impl Config {
             if let Ok(n) = v.parse::<usize>() {
                 cfg.fullscreen_min_cols = n;
             }
+        }
+        if let Some(v) = map.get("fullscreen_command") {
+            let command = v.trim();
+            if !command.is_empty() {
+                cfg.fullscreen_command = Some(command.to_string());
+            }
+        }
+        if let Some(v) = map.get("fullscreen_initial_state") {
+            cfg.fullscreen_initial_state = v == "true";
         }
 
         if let Some(v) = map.get("default_session_name") {
@@ -1062,6 +1075,8 @@ mod tests {
         assert!((config.tab_truncation_point - 0.4).abs() < f32::EPSILON);
         assert!(!config.tab_hide_single);
         assert_eq!(config.fullscreen_min_cols, 120);
+        assert_eq!(config.fullscreen_command, None);
+        assert!(!config.fullscreen_initial_state);
         assert_eq!(config.default_session_name, "main");
         assert_eq!(
             config.project_markers,
@@ -1083,11 +1098,21 @@ mod tests {
         map.insert("tab_max_width".to_string(), "50".to_string());
         map.insert("tab_min_shrink_width".to_string(), "18".to_string());
         map.insert("tab_hide_single".to_string(), "true".to_string());
+        map.insert(
+            "fullscreen_command".to_string(),
+            "wezterm cli rename-workspace __TOGGLE_FULLSCREEN__".to_string(),
+        );
+        map.insert("fullscreen_initial_state".to_string(), "true".to_string());
         map.insert("mode_color_locked".to_string(), "#00ff00".to_string());
         let config = Config::from_map(map);
         assert_eq!(config.tab_max_width, 50);
         assert_eq!(config.tab_min_shrink_width, 18);
         assert!(config.tab_hide_single);
+        assert_eq!(
+            config.fullscreen_command.as_deref(),
+            Some("wezterm cli rename-workspace __TOGGLE_FULLSCREEN__")
+        );
+        assert!(config.fullscreen_initial_state);
         assert_eq!(
             config.mode_color(InputMode::Locked),
             Some(Color::new(0, 255, 0))

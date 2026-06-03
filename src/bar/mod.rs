@@ -48,6 +48,12 @@ const CTX_PROJECT_CWD: &str = "project_cwd";
 /// clear a background-tab alarm on the active tab's focused terminal pane. The
 /// payload selects the action: `idle`, `activity`, or `clear`.
 pub const ALARM_PIPE: &str = "zj_hud_alarm";
+/// Pipe external integrations can call when the terminal emulator fullscreen
+/// state changes. Payload must be `true` or `false`.
+pub const FULLSCREEN_CHANGED_PIPE: &str = "fullscreen-changed";
+/// Pipe keybindings can call to run the configured terminal-emulator
+/// fullscreen command and optimistically flip the cached state.
+pub const TERMINAL_FULLSCREEN_TOGGLE_PIPE: &str = "terminal-fullscreen-toggle";
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -84,6 +90,11 @@ pub(crate) struct State {
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.config = Config::from_map(configuration);
+        if self.config.fullscreen_command.is_some() {
+            self.app
+                .terminal_fullscreen
+                .set(self.config.fullscreen_initial_state);
+        }
         // Identical set for both roles — see `PLUGIN_PERMISSIONS`. (The bar
         // itself only uses Read*/RunCommands/ChangeApplicationState; the extra
         // search-role permissions are requested here solely to keep the
@@ -163,6 +174,12 @@ impl State {
     pub(crate) fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if pipe_message.name == ALARM_PIPE {
             return self.handle_alarm_pipe(pipe_message.payload.as_deref());
+        }
+        if pipe_message.name == FULLSCREEN_CHANGED_PIPE {
+            return self.handle_fullscreen_changed_pipe(pipe_message.payload.as_deref());
+        }
+        if pipe_message.name == TERMINAL_FULLSCREEN_TOGGLE_PIPE {
+            return self.handle_terminal_fullscreen_toggle_pipe();
         }
         if pipe_message.name != shared_state::SYNC_PIPE {
             return false;
@@ -619,6 +636,44 @@ impl State {
         true
     }
 
+    fn handle_fullscreen_changed_pipe(&mut self, payload: Option<&str>) -> bool {
+        let is_fullscreen = match payload.map(str::trim) {
+            Some("true") => true,
+            Some("false") => false,
+            _ => return false,
+        };
+        let mut changed = false;
+        if self.config.fullscreen_command.is_some() {
+            changed |= self.app.terminal_fullscreen.value != Some(is_fullscreen);
+            self.app.terminal_fullscreen.set(is_fullscreen);
+        }
+        changed |= self.app.wezterm_fullscreen.value != Some(is_fullscreen);
+        self.app.wezterm_fullscreen.set(is_fullscreen);
+        if changed {
+            self.app.dirty = true;
+        }
+        changed
+    }
+
+    fn handle_terminal_fullscreen_toggle_pipe(&mut self) -> bool {
+        let Some(command) = self.config.fullscreen_command.as_deref() else {
+            return false;
+        };
+        if command.trim().is_empty() {
+            return false;
+        }
+
+        run_command(&["sh", "-c", command], BTreeMap::new());
+        let next = !self
+            .app
+            .terminal_fullscreen
+            .value
+            .unwrap_or(self.config.fullscreen_initial_state);
+        self.app.terminal_fullscreen.set(next);
+        self.app.dirty = true;
+        true
+    }
+
     /// Drop alarm entries whose pane no longer exists (closed panes). Active
     /// instance only — it owns the store writes.
     fn prune_alarms(&mut self) {
@@ -896,5 +951,69 @@ impl State {
         ctx.insert(system::CTX_KEY.to_string(), CTX_PROJECT_ROOT.to_string());
         ctx.insert(CTX_PROJECT_CWD.to_string(), cwd_str);
         run_command(&arg_refs, ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fullscreen_changed_pipe_updates_wezterm_cache() {
+        let mut state = State::default();
+        state.app.dirty = false;
+
+        assert!(state.handle_fullscreen_changed_pipe(Some("true")));
+        assert_eq!(state.app.wezterm_fullscreen.value, Some(true));
+        assert!(state.app.dirty);
+
+        state.app.dirty = false;
+        assert!(!state.handle_fullscreen_changed_pipe(Some("true")));
+        assert!(!state.app.dirty);
+
+        assert!(state.handle_fullscreen_changed_pipe(Some("false")));
+        assert_eq!(state.app.wezterm_fullscreen.value, Some(false));
+        assert!(state.app.dirty);
+    }
+
+    #[test]
+    fn fullscreen_changed_pipe_rejects_invalid_payloads() {
+        let mut state = State::default();
+
+        assert!(!state.handle_fullscreen_changed_pipe(Some("yes")));
+        assert_eq!(state.app.wezterm_fullscreen.value, None);
+    }
+
+    #[test]
+    fn fullscreen_changed_pipe_updates_configured_terminal_cache() {
+        let mut state = State::default();
+        state.config.fullscreen_command = Some("true".to_string());
+        state.app.dirty = false;
+
+        assert!(state.handle_fullscreen_changed_pipe(Some("true")));
+        assert_eq!(state.app.terminal_fullscreen.value, Some(true));
+        assert_eq!(state.app.wezterm_fullscreen.value, Some(true));
+        assert!(state.app.dirty);
+    }
+
+    #[test]
+    fn terminal_fullscreen_toggle_runs_configured_command_and_flips_state() {
+        let mut state = State::default();
+        state.config.fullscreen_command = Some("true".to_string());
+        state.config.fullscreen_initial_state = false;
+        state.app.terminal_fullscreen.set(false);
+        state.app.dirty = false;
+
+        assert!(state.handle_terminal_fullscreen_toggle_pipe());
+        assert_eq!(state.app.terminal_fullscreen.value, Some(true));
+        assert!(state.app.dirty);
+    }
+
+    #[test]
+    fn terminal_fullscreen_toggle_ignores_missing_command() {
+        let mut state = State::default();
+
+        assert!(!state.handle_terminal_fullscreen_toggle_pipe());
+        assert_eq!(state.app.terminal_fullscreen.value, None);
     }
 }

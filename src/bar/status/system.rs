@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zellij_tile::prelude::*;
 
@@ -10,10 +9,9 @@ use crate::shared::alarms::{self, AlarmKind, AlarmOutcome};
 pub const CTX_KEY: &str = "source";
 pub const CTX_GHOSTTY_FULLSCREEN: &str = "ghostty_fullscreen";
 pub const CTX_TZ_OFFSET: &str = "tz_offset";
+pub const CTX_WEZTERM_FULLSCREEN: &str = "wezterm_fullscreen";
 pub const CTX_WIDGET: &str = "widget";
 pub const CTX_WIDGET_ID: &str = "widget_id";
-
-const WEZTERM_FULLSCREEN_STATE: &str = "wezterm/fullscreen_state";
 
 const GHOSTTY_FULLSCREEN_SCRIPT: &str = r#"
 tell application "System Events"
@@ -40,6 +38,18 @@ tell application "System Events"
 end tell
 "#;
 
+const WEZTERM_FULLSCREEN_SCRIPT: &str = r#"
+state_home=${XDG_STATE_HOME:-$HOME/.local/state}
+for path in "$state_home/wezterm/fullscreen_state" "$HOME/.local/state/wezterm/fullscreen_state"; do
+    if [ -r "$path" ]; then
+        IFS= read -r line < "$path" || true
+        printf '%s\n' "$line"
+        exit 0
+    fi
+done
+exit 1
+"#;
+
 pub fn should_show_system_segments(
     state: &AppState,
     fullscreen_min_cols: usize,
@@ -57,6 +67,10 @@ pub fn should_show_system_segments(
 
     if is_zellij_pane_fullscreen || is_non_graphical {
         return true;
+    }
+
+    if let Some(is_fullscreen) = state.terminal_fullscreen.value {
+        return is_fullscreen;
     }
 
     if is_running_in_ghostty() {
@@ -98,11 +112,11 @@ pub fn refresh_ghostty_fullscreen_now(state: &mut AppState) {
 }
 
 pub fn maybe_refresh_wezterm_fullscreen(state: &mut AppState) {
-    refresh_wezterm_fullscreen(state, false);
+    request_wezterm_fullscreen(state, false);
 }
 
 pub fn refresh_wezterm_fullscreen_now(state: &mut AppState) {
-    refresh_wezterm_fullscreen(state, true);
+    request_wezterm_fullscreen(state, true);
 }
 
 fn request_ghostty_fullscreen(state: &mut AppState, force: bool) {
@@ -133,47 +147,18 @@ fn term_program_is(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn refresh_wezterm_fullscreen(state: &mut AppState, force: bool) {
-    if !is_running_in_wezterm() {
+fn request_wezterm_fullscreen(state: &mut AppState, force: bool) {
+    if !is_running_in_wezterm() || state.wezterm_fullscreen.in_flight {
         return;
     }
     if !force && !state.wezterm_fullscreen.is_expired() {
         return;
     }
 
-    for path in wezterm_fullscreen_state_paths(&state.home) {
-        let Ok(contents) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if let Some(is_fullscreen) = parse_wezterm_fullscreen_output(&contents) {
-            state.wezterm_fullscreen.set(is_fullscreen);
-            return;
-        }
-    }
-    state.wezterm_fullscreen.mark_refreshed();
-}
-
-fn wezterm_fullscreen_state_paths(home: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(xdg_state_home) = std::env::var("XDG_STATE_HOME") {
-        paths.push(PathBuf::from(xdg_state_home).join(WEZTERM_FULLSCREEN_STATE));
-    }
-    paths.push(home.join(".local/state").join(WEZTERM_FULLSCREEN_STATE));
-
-    let host_paths = paths
-        .iter()
-        .filter_map(|path| host_visible_path(path))
-        .collect::<Vec<_>>();
-    paths.extend(host_paths);
-    paths
-}
-
-fn host_visible_path(path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() || path.starts_with("/host") {
-        return None;
-    }
-    let without_root = path.strip_prefix("/").ok()?;
-    Some(Path::new("/host").join(without_root))
+    let mut ctx = BTreeMap::new();
+    ctx.insert(CTX_KEY.to_string(), CTX_WEZTERM_FULLSCREEN.to_string());
+    run_command(&["sh", "-c", WEZTERM_FULLSCREEN_SCRIPT], ctx);
+    state.wezterm_fullscreen.in_flight = true;
 }
 
 // ─── Timezone offset ──────────────────────────────────────────────────────────
@@ -476,6 +461,18 @@ pub fn handle_command_result(
                 state.tz_offset.mark_refreshed();
             }
         }
+        Some(CTX_WEZTERM_FULLSCREEN) => {
+            state.wezterm_fullscreen.in_flight = false;
+            if exit_code == Some(0) {
+                if let Some(is_fullscreen) = parse_wezterm_fullscreen_output(&output) {
+                    state.wezterm_fullscreen.set(is_fullscreen);
+                } else {
+                    state.wezterm_fullscreen.mark_refreshed();
+                }
+            } else {
+                state.wezterm_fullscreen.mark_refreshed();
+            }
+        }
         Some(CTX_WIDGET) => {
             let Some(id) = context.get(CTX_WIDGET_ID) else {
                 return;
@@ -600,15 +597,30 @@ mod tests {
     }
 
     #[test]
-    fn wezterm_state_paths_include_host_mount() {
-        let paths = wezterm_fullscreen_state_paths(Path::new("/Users/me"));
+    fn configured_terminal_state_overrides_column_fallback() {
+        let mut state = AppState {
+            got_permissions: true,
+            ..Default::default()
+        };
 
-        assert!(paths
-            .iter()
-            .any(|path| path == Path::new("/Users/me/.local/state/wezterm/fullscreen_state")));
-        assert!(paths
-            .iter()
-            .any(|path| path == Path::new("/host/Users/me/.local/state/wezterm/fullscreen_state")));
+        state.terminal_fullscreen.set(false);
+        assert!(!should_show_system_segments(&state, 100, 120));
+
+        state.terminal_fullscreen.set(true);
+        assert!(should_show_system_segments(&state, 100, 80));
+    }
+
+    #[test]
+    fn wezterm_fullscreen_result_updates_cache() {
+        let mut state = AppState::default();
+        state.wezterm_fullscreen.in_flight = true;
+        let mut context = BTreeMap::new();
+        context.insert(CTX_KEY.to_string(), CTX_WEZTERM_FULLSCREEN.to_string());
+
+        handle_command_result(Some(0), b"true\n", &[], &context, &mut state);
+
+        assert_eq!(state.wezterm_fullscreen.value, Some(true));
+        assert!(!state.wezterm_fullscreen.in_flight);
     }
 
     // ── parse_tz_offset ────────────────────────────────────────────────────
