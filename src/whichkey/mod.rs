@@ -126,6 +126,10 @@ pub struct WhichKeyPane {
     page: usize,
     /// Footer for the current mode + page, if any.
     footer: Option<footer::Footer>,
+    /// Latest raw `ModeUpdate` payload from Zellij. Its `mode` can flap through
+    /// transient modes, but its keymap/theme data is still the freshest source
+    /// for rendering whichever stable mode the Bar publishes.
+    mode_info: Option<ModeInfo>,
     /// The terminal pane to hand focus back to, captured from the manifest.
     origin: Option<PaneId>,
     /// Zellij frame overhead in rows (outer height − interior rows), self-
@@ -238,6 +242,7 @@ impl Default for WhichKeyPane {
             },
             page: 0,
             footer: None,
+            mode_info: None,
             origin: None,
             frame_rows: 2,
             frame_cols: 2,
@@ -452,26 +457,24 @@ impl ZellijPlugin for WhichKeyPane {
                     self.session_name = mode_info.session_name.clone();
                     self.state_log(&format!("[event:mode:session] {}\n", self.context()));
                 }
-                // Mode/base_mode/theme/keymap are *local view* state, derived
-                // directly from the live `ModeUpdate` (immediate and in step with
-                // the keybinds we display). The shared mode-trail (`backstack`),
-                // manual suppression and page are owned by the active Bar /
-                // ourselves and read from the unified shared state — we no longer
-                // publish the mode here (the Bar does).
-                self.mode = mode_info.mode;
-                self.base_mode = mode_info.base_mode.unwrap_or(InputMode::Normal);
-                self.theme = Theme::from_style(&mode_info.style);
-                self.keybinds = mode_info.get_keybinds_for_mode(mode_info.mode);
+                let incoming_mode = mode_info.mode;
+                let incoming_base = mode_info.base_mode.unwrap_or(InputMode::Normal);
+                let incoming_keybinds = mode_info.get_keybinds_for_mode(incoming_mode).len();
+                self.mode_info = Some(mode_info);
                 self.state_log(&format!(
                     "[event:mode] incoming={:?} base={:?} keybinds={} before={}\n",
-                    mode_info.mode,
-                    self.base_mode,
-                    self.keybinds.len(),
+                    incoming_mode,
+                    incoming_base,
+                    incoming_keybinds,
                     self.context()
                 ));
                 self.sync_from_shared_state();
-                // Local mode/keymap changed regardless of whether the shared
-                // trail did, so always rebuild our view.
+                // Raw Zellij mode updates can briefly flap through intermediate
+                // modes (`Tmux -> Tab -> Normal`) while pane activity is racing
+                // in another tab. The Bar already debounces and publishes the
+                // stable mode; use that for visibility/content, and use this raw
+                // event only as the freshest keymap/theme source.
+                self.apply_shared_display_mode();
                 self.rebuild();
                 self.set_title();
                 self.apply_visibility();
@@ -734,12 +737,20 @@ impl WhichKeyPane {
         self.apply_shared_state(&shared)
     }
 
-    /// Adopt the Bar-owned mode-trail and the shared suppression/page from a
-    /// fresh `SharedState`. `mode`/`base_mode` are *not* adopted here: they are
-    /// local view state driven by the live `ModeUpdate` (kept in lock-step with
-    /// the keymap we render), whereas `backstack` is maintained by the active
-    /// Bar from the same mode transitions. We always record the generation and
-    /// full state so a later combined update isn't rejected as stale.
+    fn apply_shared_display_mode(&mut self) {
+        self.mode = self.last_shared.mode();
+        self.base_mode = self.last_shared.base_mode();
+        if let Some(mode_info) = &self.mode_info {
+            self.theme = Theme::from_style(&mode_info.style);
+            self.keybinds = mode_info.get_keybinds_for_mode(self.mode);
+        }
+    }
+
+    /// Adopt the Bar-owned stable mode/trail and the shared suppression/page
+    /// from a fresh `SharedState`. Raw Zellij `ModeUpdate`s can oscillate
+    /// through transient modes under cross-tab pane activity, so visibility is
+    /// keyed to the Bar's debounced shared `mode`; raw mode events only refresh
+    /// the keymap/theme cache used to render that stable mode.
     fn apply_shared_state(&mut self, shared: &SharedState) -> bool {
         if shared.generation < self.shared_generation {
             self.state_log(&format!(
@@ -750,11 +761,15 @@ impl WhichKeyPane {
             return false;
         }
         let backstack = shared.backstack();
+        let mode = shared.mode();
+        let base_mode = shared.base_mode();
         let palette_changed =
             !shared.palette.is_empty() && shared.palette != self.last_shared.palette;
         let config_changed = !shared.which_key_config.is_empty()
             && shared.which_key_config != self.last_shared.which_key_config;
         let changed = self.backstack != backstack
+            || self.mode != mode
+            || self.base_mode != base_mode
             || self.suppressed != shared.suppressed
             || self.page != shared.page
             || palette_changed
@@ -780,6 +795,8 @@ impl WhichKeyPane {
         self.backstack = backstack;
         self.suppressed = shared.suppressed;
         self.page = shared.page;
+        self.mode = mode;
+        self.base_mode = base_mode;
         if config_changed {
             // Adopt the bar-authored `which_key { … }` block (single source of
             // truth). Preserve the operational debug/state log paths resolved at
@@ -800,6 +817,7 @@ impl WhichKeyPane {
                 self.config.apply_palette(&shared.palette);
             }
         }
+        self.apply_shared_display_mode();
         self.rebuild();
         self.set_title();
         if config_changed && self.visible {
@@ -1130,8 +1148,11 @@ impl WhichKeyPane {
             self.state_log("[visibility:skip] not ready\n");
             return;
         }
+        let active_instance = self.is_active_instance();
         if !self.want_visible() {
-            if self.any_other_float {
+            if !active_instance {
+                self.state_log("[visibility:dismiss:skip] passive instance\n");
+            } else if self.any_other_float {
                 // Another floating pane (a plugin/dialog the user opened, a
                 // toggled floating terminal, or the search dialog) shares the
                 // tab's floating layer. Hiding the layer would hide *their*
@@ -1141,7 +1162,7 @@ impl WhichKeyPane {
             } else {
                 self.hide_floating_layers_everywhere("dismissed");
             }
-        } else if self.suppressed {
+        } else if self.suppressed && active_instance {
             // Manual hide only needs to park which-key itself. Hiding the whole
             // floating layer makes the next manual unhide call ShowFloatingPanes,
             // which can visibly restore the layer before our coordinates settle.
