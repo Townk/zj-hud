@@ -29,8 +29,8 @@ pub struct Segment {
 
 /// Format a segment body with auto-contrasted foreground on `bg`.
 ///
-/// Body is `" {text}"` if `is_last`, otherwise `" {text} "`.
-pub fn format_segment(bg: Color, text: &str, is_last: bool) -> Segment {
+/// Body is `" {text} "` (a leading and trailing space around `text`).
+pub fn format_segment(bg: Color, text: &str) -> Segment {
     // 1. Compute foreground: start with a dark variant
     let mut fg = bg.darken(0.8);
     if contrast_ratio(bg, fg) < 3.8 {
@@ -38,11 +38,7 @@ pub fn format_segment(bg: Color, text: &str, is_last: bool) -> Segment {
     }
 
     // 2. Build body
-    let body = if is_last {
-        format!(" {}", text)
-    } else {
-        format!(" {} ", text)
-    };
+    let body = format!(" {} ", text);
 
     // 3. Measure width
     let width = UnicodeWidthStr::width(body.as_str());
@@ -75,14 +71,14 @@ pub fn divider_width() -> usize {
 // ─── Mode segment ─────────────────────────────────────────────────────────────
 
 /// Returns a segment for the current input mode, or `None` if Normal.
-pub fn mode_segment(mode: InputMode, bg: Color, is_last: bool, config: &Config) -> Option<Segment> {
+pub fn mode_segment(mode: InputMode, bg: Color, config: &Config) -> Option<Segment> {
     if mode == InputMode::Normal {
         return None;
     }
 
     let style = config.mode_style(mode)?;
     let text = format!("{} {}", style.icon, style.label);
-    Some(format_segment(bg, &text, is_last))
+    Some(format_segment(bg, &text))
 }
 
 // ─── Mode hint segments ────────────────────────────────────────────────────────
@@ -106,12 +102,11 @@ const GLYPH_SEARCH_WRAP: &str = "\u{F0547}";
 /// the Alt and Esc keycap glyphs in bright white, then the word `exit` in
 /// `dark` (the mode indicator's background color). `bg` is the segment's own
 /// background; `dark` is the slightly-darker mode color used for the label.
-pub fn locked_hint_segment(bg: Color, dark: Color, is_last: bool) -> Segment {
-    let trailing = if is_last { "" } else { " " };
-    let plain = format!(" {GLYPH_ALT} {GLYPH_ESC}  exit{trailing}");
+pub fn locked_hint_segment(bg: Color, dark: Color) -> Segment {
+    let plain = format!(" {GLYPH_ALT} {GLYPH_ESC}  exit ");
     let width = UnicodeWidthStr::width(plain.as_str());
     let text = format!(
-        "{bg}{on} {GLYPH_ALT} {GLYPH_ESC}  {dark}exit{trailing}",
+        "{bg}{on} {GLYPH_ALT} {GLYPH_ESC}  {dark}exit ",
         bg = bg.to_ansi_bg(),
         on = HINT_GLYPH_ON.to_ansi_fg(),
         dark = dark.to_ansi_fg(),
@@ -128,11 +123,9 @@ pub fn search_hint_segment(
     case_on: bool,
     word_on: bool,
     wrap_on: bool,
-    is_last: bool,
 ) -> Segment {
-    let trailing = if is_last { "" } else { " " };
     let plain = format!(
-        " {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap{trailing}"
+        " {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap "
     );
     let width = UnicodeWidthStr::width(plain.as_str());
 
@@ -140,7 +133,7 @@ pub fn search_hint_segment(
     let dark_fg = dark.to_ansi_fg();
     let glyph_fg = |is_on: bool| if is_on { on.as_str() } else { dark_fg.as_str() };
     let text = format!(
-        "{bg} {cf}{GLYPH_SEARCH_CASE}{d} case  {wf}{GLYPH_SEARCH_WORD}{d} word  {pf}{GLYPH_SEARCH_WRAP}{d} wrap{trailing}",
+        "{bg} {cf}{GLYPH_SEARCH_CASE}{d} case  {wf}{GLYPH_SEARCH_WORD}{d} word  {pf}{GLYPH_SEARCH_WRAP}{d} wrap ",
         bg = bg.to_ansi_bg(),
         cf = glyph_fg(case_on),
         wf = glyph_fg(word_on),
@@ -153,12 +146,7 @@ pub fn search_hint_segment(
 // ─── Session segment ──────────────────────────────────────────────────────────
 
 /// Returns a segment for the session name, or `None` if it's the default.
-pub fn session_segment(
-    session_name: &str,
-    bg: Color,
-    is_last: bool,
-    config: &Config,
-) -> Option<Segment> {
+pub fn session_segment(session_name: &str, bg: Color, config: &Config) -> Option<Segment> {
     if session_name.is_empty()
         || session_name.eq_ignore_ascii_case("main")
         || session_name == config.default_session_name
@@ -171,7 +159,7 @@ pub fn session_segment(
         icons::MODE_SESSION,
         kebab_to_title_case(session_name)
     );
-    Some(format_segment(bg, &text, is_last))
+    Some(format_segment(bg, &text))
 }
 
 /// Converts a `kebab-case` name into `Title Case` for display, e.g.
@@ -204,12 +192,7 @@ fn kebab_to_title_case(name: &str) -> String {
 /// with no access to the host timezone database — chrono silently falls
 /// back to UTC. So we take the UTC instant from chrono and re-anchor it
 /// to a `FixedOffset` we trust.
-pub fn time_segment(
-    bg: Color,
-    is_last: bool,
-    dt: &DateTimeConfig,
-    tz_offset_seconds: i32,
-) -> Segment {
+pub fn time_segment(bg: Color, dt: &DateTimeConfig, tz_offset_seconds: i32) -> Segment {
     let offset = chrono::FixedOffset::east_opt(tz_offset_seconds)
         .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).expect("UTC is always valid"));
     let now = chrono::Utc::now().with_timezone(&offset);
@@ -226,7 +209,7 @@ pub fn time_segment(
     } else {
         format!("{} {}", dt.symbol, formatted)
     };
-    format_segment(bg, &text, is_last)
+    format_segment(bg, &text)
 }
 
 // ─── Info widgets segment ─────────────────────────────────────────────────────
@@ -322,7 +305,6 @@ pub fn info_widgets_segment(
     config: &Config,
     block: &SystemInfoBlock,
     bg: Color,
-    is_last: bool,
     cols: usize,
 ) -> Option<InfoWidgetsResult> {
     let widgets = renderable_widgets(state, config, block, cols);
@@ -358,7 +340,7 @@ pub fn info_widgets_segment(
         }
     }
 
-    let segment = format_segment(bg, &body, is_last);
+    let segment = format_segment(bg, &body);
     Some(InfoWidgetsResult {
         segment,
         click_regions,
@@ -373,30 +355,21 @@ mod tests {
     use crate::bar::config::Config;
 
     #[test]
-    fn format_segment_has_leading_space() {
-        let seg = format_segment(Color::new(100, 100, 100), "test", false);
+    fn format_segment_has_leading_and_trailing_space() {
+        let seg = format_segment(Color::new(100, 100, 100), "test");
         assert!(seg.width >= 6); // " test " = 6
-    }
-
-    #[test]
-    fn format_segment_last_no_trailing_space() {
-        let seg_last = format_segment(Color::new(100, 100, 100), "test", true);
-        let seg_mid = format_segment(Color::new(100, 100, 100), "test", false);
-        assert_eq!(seg_last.width, seg_mid.width - 1);
     }
 
     #[test]
     fn mode_segment_suppressed_for_normal() {
         let config = Config::default();
-        assert!(
-            mode_segment(InputMode::Normal, Color::new(100, 100, 100), false, &config).is_none()
-        );
+        assert!(mode_segment(InputMode::Normal, Color::new(100, 100, 100), &config).is_none());
     }
 
     #[test]
     fn mode_segment_present_for_locked() {
         let config = Config::default();
-        let seg = mode_segment(InputMode::Locked, Color::new(255, 102, 102), false, &config);
+        let seg = mode_segment(InputMode::Locked, Color::new(255, 102, 102), &config);
         assert!(seg.is_some());
         assert!(seg.unwrap().width > 0);
     }
@@ -409,8 +382,7 @@ mod tests {
             r##"locked color="#fab387" icon="L" label="Passthrough""##.to_string(),
         );
         let config = Config::from_map(map);
-        let seg =
-            mode_segment(InputMode::Locked, Color::new(255, 102, 102), false, &config).unwrap();
+        let seg = mode_segment(InputMode::Locked, Color::new(255, 102, 102), &config).unwrap();
 
         assert!(seg.text.contains("L Passthrough"));
     }
@@ -419,19 +391,12 @@ mod tests {
 
     #[test]
     fn locked_hint_renders_keycaps_and_exit() {
-        let seg = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40), false);
+        let seg = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40));
         assert!(seg.text.contains(GLYPH_ALT));
         assert!(seg.text.contains(GLYPH_ESC));
         assert!(seg.text.contains("exit"));
-        // " 󰘵 󱊷  exit " → 11 cells (last=false keeps the trailing space).
+        // " 󰘵 󱊷  exit " → 11 cells (leading and trailing space).
         assert_eq!(seg.width, 11);
-    }
-
-    #[test]
-    fn locked_hint_last_drops_trailing_space() {
-        let mid = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40), false);
-        let last = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40), true);
-        assert_eq!(last.width, mid.width - 1);
     }
 
     #[test]
@@ -439,7 +404,7 @@ mod tests {
         let dark = Color::new(40, 40, 80);
         let on = HINT_GLYPH_ON.to_ansi_fg();
         // Only `word` is on: its glyph must be white, case/wrap must be dark.
-        let seg = search_hint_segment(dark, dark, false, true, false, false);
+        let seg = search_hint_segment(dark, dark, false, true, false);
         let word_white = format!("{}{}", on, GLYPH_SEARCH_WORD);
         assert!(seg.text.contains(&word_white));
         let case_white = format!("{}{}", on, GLYPH_SEARCH_CASE);
@@ -454,7 +419,7 @@ mod tests {
     #[test]
     fn session_segment_suppressed_for_main() {
         let config = Config::default();
-        assert!(session_segment("main", Color::new(100, 100, 100), false, &config).is_none());
+        assert!(session_segment("main", Color::new(100, 100, 100), &config).is_none());
     }
 
     #[test]
@@ -463,19 +428,19 @@ mod tests {
             default_session_name: "work".to_string(),
             ..Config::default()
         };
-        assert!(session_segment("main", Color::new(100, 100, 100), false, &config).is_none());
+        assert!(session_segment("main", Color::new(100, 100, 100), &config).is_none());
     }
 
     #[test]
     fn session_segment_suppresses_capitalized_main() {
         let config = Config::default();
-        assert!(session_segment("Main", Color::new(100, 100, 100), false, &config).is_none());
+        assert!(session_segment("Main", Color::new(100, 100, 100), &config).is_none());
     }
 
     #[test]
     fn session_segment_shown_for_other() {
         let config = Config::default();
-        let seg = session_segment("dev", Color::new(100, 100, 100), false, &config);
+        let seg = session_segment("dev", Color::new(100, 100, 100), &config);
         assert!(seg.is_some());
     }
 
@@ -483,7 +448,7 @@ mod tests {
     fn session_segment_converts_kebab_to_title_case() {
         let config = Config::default();
         let seg =
-            session_segment("my-cool-session", Color::new(100, 100, 100), false, &config).unwrap();
+            session_segment("my-cool-session", Color::new(100, 100, 100), &config).unwrap();
         assert!(seg.text.contains("My Cool Session"));
         assert!(!seg.text.contains("my-cool-session"));
     }
@@ -646,7 +611,7 @@ mod tests {
 
         let config = Config::default();
         let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), true, 80)
+            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
                 .expect("segment");
 
         // The visible part of the body should be exactly " B85  W1"
@@ -713,7 +678,7 @@ mod tests {
 
         let config = Config::default();
         let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), true, 80)
+            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
                 .expect("segment");
 
         // Body should be " X42" (leading space + the surviving widget),
@@ -741,7 +706,7 @@ mod tests {
             widgets: vec![build_widget(vec![])],
         };
         let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), true, 80);
+            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80);
         assert!(result.is_none());
     }
 
@@ -787,7 +752,7 @@ mod tests {
 
         let config = Config::default();
         let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), true, 80)
+            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
                 .expect("segment");
 
         assert_eq!(result.click_regions.len(), 2);

@@ -282,7 +282,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     // (We build it twice to keep the gradient step count exact — info
     // widgets that have no samples yet should not steal a gradient stop.)
     let widgets_segment_probe = system_info_block
-        .and_then(|block| info_widgets_segment(state, config, block, BAR_BG, false, cols));
+        .and_then(|block| info_widgets_segment(state, config, block, BAR_BG, cols));
     let widgets_present = widgets_segment_probe.is_some();
 
     let segment_count = mode_present as usize
@@ -307,17 +307,12 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
 
     let grad_stops = gradient(base_color, BAR_BG, segment_count + 1);
 
-    struct SegmentSpec {
-        bg: Color,
-        is_last: bool,
-    }
-
-    let mut specs: Vec<SegmentSpec> = Vec::with_capacity(segment_count);
+    let mut specs: Vec<Color> = Vec::with_capacity(segment_count);
     let mut position = 0usize;
     let mut next_spec = || {
         let bg = grad_stops[segment_count - 1 - position];
         position += 1;
-        SegmentSpec { bg, is_last: false }
+        bg
     };
 
     if mode_present {
@@ -336,10 +331,6 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
         specs.push(next_spec());
     }
 
-    if let Some(last) = specs.last_mut() {
-        last.is_last = true;
-    }
-
     enum Built {
         Mode(Segment),
         Hint(Segment),
@@ -356,59 +347,52 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     // own bg). Capture it as we consume the mode spec.
     let mut mode_bg = base_color;
     if mode_present {
-        let s = spec_iter.next().unwrap();
-        mode_bg = s.bg;
-        if let Some(seg) = mode_segment(effective_mode, s.bg, s.is_last, config) {
+        let bg = spec_iter.next().unwrap();
+        mode_bg = bg;
+        if let Some(seg) = mode_segment(effective_mode, bg, config) {
             built.push(Built::Mode(seg));
         }
     }
     if hint_present {
-        let s = spec_iter.next().unwrap();
+        let bg = spec_iter.next().unwrap();
         let seg = match effective_mode {
-            InputMode::Locked => locked_hint_segment(s.bg, mode_bg, s.is_last),
+            InputMode::Locked => locked_hint_segment(bg, mode_bg),
             _ => search_hint_segment(
-                s.bg,
+                bg,
                 mode_bg,
                 state.search_case_sensitive,
                 state.search_whole_word,
                 state.search_wrap,
-                s.is_last,
             ),
         };
         built.push(Built::Hint(seg));
     }
     if session_present {
-        let s = spec_iter.next().unwrap();
-        if let Some(seg) = session_segment(&state.session_name, s.bg, s.is_last, config) {
+        let bg = spec_iter.next().unwrap();
+        if let Some(seg) = session_segment(&state.session_name, bg, config) {
             built.push(Built::Session(seg));
         }
     }
     if widgets_present {
-        let s = spec_iter.next().unwrap();
+        let bg = spec_iter.next().unwrap();
         // Re-render with the correct gradient bg. Safe to unwrap: probe was Some.
         if let Some(result) = info_widgets_segment(
             state,
             config,
             system_info_block.expect("system_info present"),
-            s.bg,
-            s.is_last,
+            bg,
             cols,
         ) {
             built.push(Built::Widgets(result));
         }
     }
     if time_present {
-        let s = spec_iter.next().unwrap();
+        let bg = spec_iter.next().unwrap();
         // Offset is populated asynchronously by `system::maybe_refresh_tz_offset`.
         // Until the first `date +%z` lands we render in UTC, which is briefly
         // wrong on first paint but corrects itself within one timer tick.
         let tz_offset_seconds = state.tz_offset.value.unwrap_or(0);
-        built.push(Built::Time(time_segment(
-            s.bg,
-            s.is_last,
-            dt,
-            tz_offset_seconds,
-        )));
+        built.push(Built::Time(time_segment(bg, dt, tz_offset_seconds)));
     }
 
     let mut text = String::new();
