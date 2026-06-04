@@ -78,23 +78,76 @@ impl Default for IconLibrary {
 /// Visibility gating shared by `date_time`, `system_info`, and individual
 /// widgets. `Fullscreen` defers to the existing `should_show_system_segments`
 /// predicate (zoomed pane / non-graphical / terminal fullscreen / cols ≥ N).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibilityConditions {
+    pub fullscreen: Option<bool>,
+    pub ssh: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Visibility {
     Always,
     #[default]
     Fullscreen,
+    Conditions(VisibilityConditions),
     Never,
 }
 
 impl Visibility {
     fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "always" => Some(Visibility::Always),
             "fullscreen" => Some(Visibility::Fullscreen),
             "never" => Some(Visibility::Never),
-            _ => None,
+            _ => parse_visibility_conditions(&normalized),
         }
     }
+}
+
+fn parse_visibility_conditions(s: &str) -> Option<Visibility> {
+    let mut conditions = VisibilityConditions {
+        fullscreen: None,
+        ssh: None,
+    };
+
+    for raw_part in s.split('|') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return None;
+        }
+
+        let (negated, name) = part
+            .strip_prefix('!')
+            .map(|name| (true, name))
+            .unwrap_or((false, part));
+        if name.is_empty() {
+            return None;
+        }
+        let expected = !negated;
+
+        match name {
+            "always" => {}
+            "never" => return Some(Visibility::Never),
+            "fullscreen" => set_visibility_condition(&mut conditions.fullscreen, expected)?,
+            "ssh" => set_visibility_condition(&mut conditions.ssh, expected)?,
+            _ => return None,
+        }
+    }
+
+    match (conditions.fullscreen, conditions.ssh) {
+        (None, None) => Some(Visibility::Always),
+        (Some(true), None) => Some(Visibility::Fullscreen),
+        _ => Some(Visibility::Conditions(conditions)),
+    }
+}
+
+fn set_visibility_condition(slot: &mut Option<bool>, expected: bool) -> Option<()> {
+    if slot.is_some_and(|existing| existing != expected) {
+        return None;
+    }
+    *slot = Some(expected);
+    Some(())
 }
 
 #[derive(Clone, Debug)]
@@ -1090,6 +1143,45 @@ mod tests {
             config.mode_style(InputMode::Locked).unwrap(),
             &ModeStyle::new(Color::new(255, 102, 102), icons::MODE_LOCKED, "Locked")
         );
+    }
+
+    #[test]
+    fn parse_visibility_conditions() {
+        assert_eq!(Visibility::parse("always"), Some(Visibility::Always));
+        assert_eq!(
+            Visibility::parse("fullscreen"),
+            Some(Visibility::Fullscreen)
+        );
+        assert_eq!(Visibility::parse("never"), Some(Visibility::Never));
+        assert_eq!(
+            Visibility::parse("ssh"),
+            Some(Visibility::Conditions(VisibilityConditions {
+                fullscreen: None,
+                ssh: Some(true),
+            }))
+        );
+        assert_eq!(
+            Visibility::parse("!ssh"),
+            Some(Visibility::Conditions(VisibilityConditions {
+                fullscreen: None,
+                ssh: Some(false),
+            }))
+        );
+        assert_eq!(
+            Visibility::parse("ssh|fullscreen"),
+            Some(Visibility::Conditions(VisibilityConditions {
+                fullscreen: Some(true),
+                ssh: Some(true),
+            }))
+        );
+        assert_eq!(
+            Visibility::parse("!ssh|fullscreen"),
+            Some(Visibility::Conditions(VisibilityConditions {
+                fullscreen: Some(true),
+                ssh: Some(false),
+            }))
+        );
+        assert_eq!(Visibility::parse("ssh|!ssh"), None);
     }
 
     #[test]

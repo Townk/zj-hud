@@ -100,6 +100,20 @@ pub fn is_visible(
             let threshold = min_cols_override.unwrap_or(config.fullscreen_min_cols);
             should_show_system_segments(state, threshold, cols)
         }
+        Visibility::Conditions(conditions) => {
+            if let Some(expected) = conditions.fullscreen {
+                let threshold = min_cols_override.unwrap_or(config.fullscreen_min_cols);
+                if should_show_system_segments(state, threshold, cols) != expected {
+                    return false;
+                }
+            }
+            if let Some(expected) = conditions.ssh {
+                if is_ssh_session() != expected {
+                    return false;
+                }
+            }
+            true
+        }
     }
 }
 
@@ -145,6 +159,10 @@ fn term_program_is(name: &str) -> bool {
     std::env::var("TERM_PROGRAM")
         .map(|term| term.eq_ignore_ascii_case(name))
         .unwrap_or(false)
+}
+
+fn is_ssh_session() -> bool {
+    std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_CLIENT").is_ok()
 }
 
 fn request_wezterm_fullscreen(state: &mut AppState, force: bool) {
@@ -376,24 +394,22 @@ fn fire_alarm_notification(state: &AppState, config: &Config, pane_id: u32) {
     };
     let title = format!("zj-hud: {tab_label}");
     let message = format!("{subject} - {reason}");
-    let group = format!("zj-hud-{pane_id}");
-
-    let argv: Vec<String> = config
+    let group = format!("zj-hud-pane-{pane_id}");
+    let args = config
         .alarms
         .notify_command
         .iter()
-        .map(|token| {
-            token
-                .replace("{title}", &title)
+        .map(|arg| {
+            arg.replace("{title}", &title)
                 .replace("{message}", &message)
                 .replace("{group}", &group)
         })
-        .collect();
-    if argv.is_empty() {
-        return;
+        .collect::<Vec<_>>();
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+    if !arg_refs.is_empty() {
+        run_command(&arg_refs, BTreeMap::new());
     }
-    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    run_command(&refs, BTreeMap::new());
 }
 
 // ─── User-defined widgets ─────────────────────────────────────────────────────
@@ -529,6 +545,26 @@ mod tests {
         }
     }
 
+    fn with_ssh_connection(value: Option<&str>, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous_connection = std::env::var_os("SSH_CONNECTION");
+        let previous_client = std::env::var_os("SSH_CLIENT");
+        match value {
+            Some(value) => std::env::set_var("SSH_CONNECTION", value),
+            None => std::env::remove_var("SSH_CONNECTION"),
+        }
+        std::env::remove_var("SSH_CLIENT");
+        f();
+        match previous_connection {
+            Some(previous) => std::env::set_var("SSH_CONNECTION", previous),
+            None => std::env::remove_var("SSH_CONNECTION"),
+        }
+        match previous_client {
+            Some(previous) => std::env::set_var("SSH_CLIENT", previous),
+            None => std::env::remove_var("SSH_CLIENT"),
+        }
+    }
+
     #[test]
     fn parse_ghostty_fullscreen_states() {
         assert_eq!(
@@ -608,6 +644,53 @@ mod tests {
 
         state.terminal_fullscreen.set(true);
         assert!(should_show_system_segments(&state, 100, 80));
+    }
+
+    #[test]
+    fn ssh_visibility_conditions_match_session_environment() {
+        let state = AppState {
+            got_permissions: true,
+            ..Default::default()
+        };
+        let config = Config::default();
+        let ssh_visibility = Visibility::Conditions(crate::bar::config::VisibilityConditions {
+            fullscreen: None,
+            ssh: Some(true),
+        });
+        let not_ssh_visibility = Visibility::Conditions(crate::bar::config::VisibilityConditions {
+            fullscreen: None,
+            ssh: Some(false),
+        });
+
+        with_ssh_connection(Some("client 1 server 2"), || {
+            assert!(is_visible(ssh_visibility, None, &state, &config, 80));
+            assert!(!is_visible(not_ssh_visibility, None, &state, &config, 80));
+        });
+        with_ssh_connection(None, || {
+            assert!(!is_visible(ssh_visibility, None, &state, &config, 80));
+            assert!(is_visible(not_ssh_visibility, None, &state, &config, 80));
+        });
+    }
+
+    #[test]
+    fn compound_visibility_conditions_are_additive() {
+        let mut state = AppState {
+            got_permissions: true,
+            ..Default::default()
+        };
+        let config = Config::default();
+        let ssh_and_fullscreen = Visibility::Conditions(crate::bar::config::VisibilityConditions {
+            fullscreen: Some(true),
+            ssh: Some(true),
+        });
+
+        with_ssh_connection(Some("client 1 server 2"), || {
+            state.terminal_fullscreen.set(false);
+            assert!(!is_visible(ssh_and_fullscreen, None, &state, &config, 80));
+
+            state.terminal_fullscreen.set(true);
+            assert!(is_visible(ssh_and_fullscreen, None, &state, &config, 80));
+        });
     }
 
     #[test]

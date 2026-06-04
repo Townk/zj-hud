@@ -5,7 +5,9 @@
 # URL the user's layout references for the plugin. Must match the
 # `location=` value in ~/.config/zellij/layouts/default.kdl exactly,
 # since Zellij identifies plugin instances by their URL.
-plugin_url := "file:" + env_var('HOME') + "/Projects/apps/zellij/zj-hud/target/wasm32-wasip1/release/zj-hud.wasm"
+wasm_path := justfile_directory() + "/target/wasm32-wasip1/release/zj-hud.wasm"
+plugin_url := "file:" + wasm_path
+remote_wasm_path := "Projects/apps/zellij/zj-hud/target/wasm32-wasip1/release/zj-hud.wasm"
 
 # Default to the dev loop: build + reload in the running Zellij session.
 default: reload
@@ -13,6 +15,13 @@ default: reload
 # Build the plugin in release mode for Zellij's wasm target.
 build:
     cargo build --release --target wasm32-wasip1
+
+# Build, then copy the release wasm to Remote Shell.
+copy-remote: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ssh remote 'mkdir -p "$HOME/Projects/apps/zellij/zj-hud/target/wasm32-wasip1/release"'
+    scp "{{ wasm_path }}" "remote:{{ remote_wasm_path }}"
 
 # Build, then hot-reload the running plugin (and close the spurious side pane).
 reload: build
@@ -23,7 +32,7 @@ reload: build
     # a new pane on top of reloading the layout-loaded one. We capture the new
     # plugin id printed on stdout and close that spurious pane.
     set -euo pipefail
-    pid=$(zellij action start-or-reload-plugin {{plugin_url}})
+    pid=$(zellij action start-or-reload-plugin {{ plugin_url }})
     if [[ "$pid" =~ ^plugin_[0-9]+$ ]]; then
         zellij action close-pane --pane-id "$pid" 2>/dev/null || true
     fi
