@@ -534,34 +534,46 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_term_program(value: &str, f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os("TERM_PROGRAM");
-        std::env::set_var("TERM_PROGRAM", value);
-        f();
-        match previous {
-            Some(previous) => std::env::set_var("TERM_PROGRAM", previous),
+    /// Run `f` with a deterministic environment for the visibility logic.
+    ///
+    /// `std::env::{set,remove}_var` mutate process-global state, so every
+    /// env-dependent test serializes on `ENV_LOCK` (recovering from poisoning
+    /// so a single failed assertion reports cleanly instead of cascading
+    /// `PoisonError`s into its siblings). `DISPLAY` is always set so
+    /// `should_show_system_segments` exercises the fullscreen/condition path
+    /// rather than its "non-graphical ⇒ always show" shortcut, which would
+    /// otherwise fire on a headless CI runner that has no `TERM_PROGRAM` or
+    /// display set. `term_program` and `ssh` select the terminal-detection and
+    /// SSH-session signals; both are reset to the requested state on entry so
+    /// the baseline is independent of the host (or a previously panicking
+    /// test) leaving values behind.
+    fn with_env(term_program: Option<&str>, ssh: Option<&str>, f: impl FnOnce()) {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let keys = ["TERM_PROGRAM", "DISPLAY", "SSH_CONNECTION", "SSH_CLIENT"];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            keys.iter().map(|&k| (k, std::env::var_os(k))).collect();
+
+        std::env::set_var("DISPLAY", ":0");
+        match term_program {
+            Some(value) => std::env::set_var("TERM_PROGRAM", value),
             None => std::env::remove_var("TERM_PROGRAM"),
         }
-    }
-
-    fn with_ssh_connection(value: Option<&str>, f: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let previous_connection = std::env::var_os("SSH_CONNECTION");
-        let previous_client = std::env::var_os("SSH_CLIENT");
-        match value {
+        match ssh {
             Some(value) => std::env::set_var("SSH_CONNECTION", value),
             None => std::env::remove_var("SSH_CONNECTION"),
         }
         std::env::remove_var("SSH_CLIENT");
+
         f();
-        match previous_connection {
-            Some(previous) => std::env::set_var("SSH_CONNECTION", previous),
-            None => std::env::remove_var("SSH_CONNECTION"),
-        }
-        match previous_client {
-            Some(previous) => std::env::set_var("SSH_CLIENT", previous),
-            None => std::env::remove_var("SSH_CLIENT"),
+
+        for (key, previous) in saved {
+            match previous {
+                Some(previous) => std::env::set_var(key, previous),
+                None => std::env::remove_var(key),
+            }
         }
     }
 
@@ -586,7 +598,7 @@ mod tests {
 
     #[test]
     fn known_ghostty_windowed_state_overrides_column_fallback() {
-        with_term_program("ghostty", || {
+        with_env(Some("ghostty"), None, || {
             let mut state = AppState {
                 got_permissions: true,
                 ..Default::default()
@@ -599,7 +611,7 @@ mod tests {
 
     #[test]
     fn unknown_ghostty_state_stays_hidden() {
-        with_term_program("ghostty", || {
+        with_env(Some("ghostty"), None, || {
             let state = AppState {
                 got_permissions: true,
                 ..Default::default()
@@ -619,7 +631,7 @@ mod tests {
 
     #[test]
     fn known_wezterm_state_overrides_column_fallback() {
-        with_term_program("WezTerm", || {
+        with_env(Some("WezTerm"), None, || {
             let mut state = AppState {
                 got_permissions: true,
                 ..Default::default()
@@ -634,16 +646,18 @@ mod tests {
 
     #[test]
     fn configured_terminal_state_overrides_column_fallback() {
-        let mut state = AppState {
-            got_permissions: true,
-            ..Default::default()
-        };
+        with_env(None, None, || {
+            let mut state = AppState {
+                got_permissions: true,
+                ..Default::default()
+            };
 
-        state.terminal_fullscreen.set(false);
-        assert!(!should_show_system_segments(&state, 100, 120));
+            state.terminal_fullscreen.set(false);
+            assert!(!should_show_system_segments(&state, 100, 120));
 
-        state.terminal_fullscreen.set(true);
-        assert!(should_show_system_segments(&state, 100, 80));
+            state.terminal_fullscreen.set(true);
+            assert!(should_show_system_segments(&state, 100, 80));
+        });
     }
 
     #[test]
@@ -662,11 +676,11 @@ mod tests {
             ssh: Some(false),
         });
 
-        with_ssh_connection(Some("client 1 server 2"), || {
+        with_env(None, Some("client 1 server 2"), || {
             assert!(is_visible(ssh_visibility, None, &state, &config, 80));
             assert!(!is_visible(not_ssh_visibility, None, &state, &config, 80));
         });
-        with_ssh_connection(None, || {
+        with_env(None, None, || {
             assert!(!is_visible(ssh_visibility, None, &state, &config, 80));
             assert!(is_visible(not_ssh_visibility, None, &state, &config, 80));
         });
@@ -684,7 +698,7 @@ mod tests {
             ssh: Some(true),
         });
 
-        with_ssh_connection(Some("client 1 server 2"), || {
+        with_env(None, Some("client 1 server 2"), || {
             state.terminal_fullscreen.set(false);
             assert!(!is_visible(ssh_and_fullscreen, None, &state, &config, 80));
 
