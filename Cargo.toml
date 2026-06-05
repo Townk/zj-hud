@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "A Zellij HUD plugin with a status bar, which-key panel, and visual search dialog"
 license = "MIT"
+authors = ["Thiago Alves <thiago@rapinialves.com>"]
+repository = "https://github.com/Townk/zj-hud"
+homepage = "https://github.com/Townk/zj-hud"
+readme = "README.md"
+keywords = ["zellij", "plugin", "status-bar", "which-key", "wasm"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 zellij-tile = "0.44"

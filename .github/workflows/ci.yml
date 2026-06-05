@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # rust-toolchain.toml pins the channel and the wasm32-wasip1 target,
+      # so rustup installs both automatically on first use.
+      - name: Show toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (host)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (wasm target)
+        run: cargo clippy --target wasm32-wasip1 -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Build (wasm release)
+        run: cargo build --release --target wasm32-wasip1
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: zj-hud-wasm
+          path: target/wasm32-wasip1/release/zj-hud.wasm
+          if-no-files-found: error

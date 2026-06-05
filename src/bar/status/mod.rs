@@ -124,9 +124,8 @@ pub fn search_hint_segment(
     word_on: bool,
     wrap_on: bool,
 ) -> Segment {
-    let plain = format!(
-        " {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap "
-    );
+    let plain =
+        format!(" {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap ");
     let width = UnicodeWidthStr::width(plain.as_str());
 
     let on = HINT_GLYPH_ON.to_ansi_fg();
@@ -447,8 +446,7 @@ mod tests {
     #[test]
     fn session_segment_converts_kebab_to_title_case() {
         let config = Config::default();
-        let seg =
-            session_segment("my-cool-session", Color::new(100, 100, 100), &config).unwrap();
+        let seg = session_segment("my-cool-session", Color::new(100, 100, 100), &config).unwrap();
         assert!(seg.text.contains("My Cool Session"));
         assert!(!seg.text.contains("my-cool-session"));
     }
@@ -610,9 +608,8 @@ mod tests {
         };
 
         let config = Config::default();
-        let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
-                .expect("segment");
+        let result = info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
+            .expect("segment");
 
         // The visible part of the body should be exactly " B85  W1"
         // (1 leading space + battery + 2-space separator + wifi).
@@ -677,9 +674,8 @@ mod tests {
         };
 
         let config = Config::default();
-        let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
-                .expect("segment");
+        let result = info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
+            .expect("segment");
 
         // Body should be " X42" (leading space + the surviving widget),
         // *not* "|X42" or " |X42".
@@ -705,8 +701,7 @@ mod tests {
             min_cols: None,
             widgets: vec![build_widget(vec![])],
         };
-        let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80);
+        let result = info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80);
         assert!(result.is_none());
     }
 
@@ -751,9 +746,8 @@ mod tests {
         };
 
         let config = Config::default();
-        let result =
-            info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
-                .expect("segment");
+        let result = info_widgets_segment(&state, &config, &block, Color::new(50, 50, 50), 80)
+            .expect("segment");
 
         assert_eq!(result.click_regions.len(), 2);
         // First widget rendering is "X1" → starts at col 1, ends at col 3.
