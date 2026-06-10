@@ -6,7 +6,8 @@ use zellij_tile::prelude::InputMode;
 
 use crate::shared::geometry::{Anchor, HAlign, Padding, VAlign, WidthMode};
 use crate::whichkey::labels::{
-    format_key_compact, parse_chord, parse_chord_to_key, Group, LabelSpec, Labels, ModeLabels,
+    format_key, format_key_compact, parse_chord, parse_chord_to_key, Group, LabelSpec, Labels,
+    ModeLabels,
 };
 use crate::whichkey::modes::{group_members, mode_color, mode_icon, str_to_mode};
 use crate::whichkey::theme::parse_color;
@@ -35,6 +36,10 @@ pub struct Config {
     /// Inner padding: cells between the frame and the content (text).
     pub padding: Padding,
 
+    /// Modes where the panel starts suppressed whenever that mode is entered.
+    /// Manual toggles still apply after entry until the next mode transition.
+    pub start_hidden_modes: Vec<InputMode>,
+
     // Footer paging-hint display overrides (auto-discovered when unset).
     pub next_page_key: Option<String>,
     pub prev_page_key: Option<String>,
@@ -42,6 +47,9 @@ pub struct Config {
     /// pipe). The host strips pipe names from the keymap, so it can't be
     /// auto-discovered; set it to surface a `<glyph> hide` footer affordance.
     pub toggle_key: Option<String>,
+    /// The same `toggle_key`, rendered with spaces between key glyphs for the
+    /// status-bar hint shown while WhichKey is hidden.
+    pub toggle_key_label: Option<String>,
     /// Footer hint for the `wk_go_back` key (the chord bound to the back pipe).
     /// Like the others its pipe name is stripped from the keymap, so set it to
     /// surface a `<glyph> back` affordance — shown only when there's somewhere
@@ -98,9 +106,11 @@ impl Default for Config {
                 bottom: 0,
                 left: 1,
             },
+            start_hidden_modes: Vec::new(),
             next_page_key: None,
             prev_page_key: None,
             toggle_key: None,
+            toggle_key_label: None,
             back_key: None,
             labels: Labels::new(),
             binding_separator: "\u{279C}".to_string(), // ➜
@@ -163,9 +173,13 @@ impl Config {
         if let Some(v) = map.get("padding") {
             config.padding = parse_padding(v);
         }
+        if let Some(v) = map.get("start_hidden") {
+            config.start_hidden_modes = parse_mode_list(v);
+        }
         config.next_page_key = map.get("next_page_key").and_then(|s| page_key_glyph(s));
         config.prev_page_key = map.get("prev_page_key").and_then(|s| page_key_glyph(s));
         config.toggle_key = map.get("toggle_key").and_then(|s| page_key_glyph(s));
+        config.toggle_key_label = map.get("toggle_key").and_then(|s| key_label_glyph(s));
         config.back_key = map.get("back_key").and_then(|s| page_key_glyph(s));
         if let Some(v) = map.get("binding_separator") {
             let v = v.trim();
@@ -244,6 +258,10 @@ impl Config {
 /// (`󰘴D`).
 fn page_key_glyph(chord: &str) -> Option<String> {
     parse_chord_to_key(chord).map(|k| format_key_compact(&k))
+}
+
+fn key_label_glyph(chord: &str) -> Option<String> {
+    parse_chord_to_key(chord).map(|k| format_key(&k))
 }
 
 // --- labels -----------------------------------------------------------------
@@ -584,6 +602,7 @@ mod tests {
             anchor "top+left"
             margin "1,2,1,2"
             padding "0,3,0,3"
+            start_hidden "scroll"
             binding_separator "|"
             labels {
                 wk binding="Ctrl h" desc="focus left"
@@ -604,6 +623,7 @@ mod tests {
             }
         );
         assert_eq!(cfg.binding_separator, "|");
+        assert_eq!(cfg.start_hidden_modes, vec![InputMode::Scroll]);
         assert_ne!(
             cfg.labels,
             Config::default().labels,
@@ -854,6 +874,21 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("binding_separator".into(), "|".into());
         assert_eq!(Config::from_map(&m).binding_separator, "|");
+    }
+
+    #[test]
+    fn start_hidden_modes_parse_mode_list_and_aliases() {
+        let mut m = BTreeMap::new();
+        m.insert("start_hidden".into(), "scroll search bogus".into());
+        let c = Config::from_map(&m);
+        assert_eq!(
+            c.start_hidden_modes,
+            vec![InputMode::Scroll, InputMode::Search, InputMode::EnterSearch]
+        );
+        assert!(c.start_hidden_modes.contains(&InputMode::Scroll));
+        assert!(c.start_hidden_modes.contains(&InputMode::Search));
+        assert!(c.start_hidden_modes.contains(&InputMode::EnterSearch));
+        assert!(!c.start_hidden_modes.contains(&InputMode::Pane));
     }
 
     #[test]

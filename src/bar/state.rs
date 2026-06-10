@@ -123,6 +123,10 @@ pub struct AppState {
     pub search_case_sensitive: bool,
     pub search_whole_word: bool,
     pub search_wrap: bool,
+    /// Mirror of WhichKey's shared `suppressed` flag. When true in a mode where
+    /// WhichKey would normally be useful, the bar shows the configured toggle
+    /// key as a reminder for how to bring the panel back.
+    pub which_key_suppressed: bool,
     /// Floating rename dialog state. Like search, the rename dialog holds the
     /// client in `Normal` while it intercepts input, so the bar reads this mirror
     /// to keep showing the active rename mode.
@@ -179,6 +183,7 @@ impl Default for AppState {
             search_case_sensitive: false,
             search_whole_word: false,
             search_wrap: true,
+            which_key_suppressed: false,
             rename_active: false,
             rename_mode: InputMode::RenameTab,
             tabs: Vec::new(),

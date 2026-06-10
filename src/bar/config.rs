@@ -249,9 +249,15 @@ pub struct Config {
     /// the `location=` your layout uses, or Zellij will load a second copy.
     pub search_plugin_url: String,
     /// Raw KDL of the `which_key { … }` block, captured verbatim and forwarded
-    /// to the WhichKey panel through the shared state (the bar itself does not
-    /// interpret it). Empty when no block is configured.
+    /// to the WhichKey panel through the shared state. Empty when no block is
+    /// configured.
     pub which_key_config: String,
+    /// Parsed subset of `which_key { … }` used by the Bar when publishing mode
+    /// transitions so `suppressed` starts in the configured state for that mode.
+    pub which_key_start_hidden_modes: Vec<InputMode>,
+    /// Compact rendered glyph for `which_key.toggle_key`, used by the Bar when
+    /// WhichKey is hidden so the status hint can show how to bring it back.
+    pub which_key_toggle_key: Option<String>,
     /// Raw KDL of the `search { … }` block, captured verbatim and forwarded to
     /// the Search dialog through the shared state (the bar itself does not
     /// interpret it). Empty when no block is configured.
@@ -399,6 +405,8 @@ impl Default for Config {
             click_commands: Vec::new(),
             search_plugin_url: default_search_plugin_url(),
             which_key_config: String::new(),
+            which_key_start_hidden_modes: Vec::new(),
+            which_key_toggle_key: None,
             search_config: String::new(),
             alarms: AlarmConfig::default(),
         }
@@ -458,10 +466,14 @@ impl Config {
         }
 
         // Captured verbatim (Zellij hands nested blocks as a stringified KDL
-        // child blob) and forwarded to the WhichKey panel via the shared state;
-        // the bar never interprets it.
+        // child blob) and forwarded to the WhichKey panel via the shared state.
+        // The Bar also reads the mode-entry suppression list because it owns the
+        // mode publish that resets WhichKey's initial hidden state.
         if let Some(block) = map.get("which_key") {
             cfg.which_key_config = block.clone();
+            let which_key = crate::whichkey::config::Config::from_block(block);
+            cfg.which_key_start_hidden_modes = which_key.start_hidden_modes;
+            cfg.which_key_toggle_key = which_key.toggle_key_label;
         }
         if let Some(block) = map.get("search") {
             cfg.search_config = block.clone();
@@ -601,6 +613,10 @@ impl Config {
                 style.label = label.clone();
             }
         }
+    }
+
+    pub fn which_key_starts_hidden(&self, mode: InputMode) -> bool {
+        self.which_key_start_hidden_modes.contains(&mode)
     }
 }
 
@@ -1209,6 +1225,27 @@ mod tests {
             config.mode_color(InputMode::Locked),
             Some(Color::new(0, 255, 0))
         );
+    }
+
+    #[test]
+    fn which_key_start_hidden_modes_are_cached_for_mode_publish() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "which_key".to_string(),
+            r#"
+start_hidden "scroll search"
+toggle_key "Alt ."
+"#
+            .to_string(),
+        );
+
+        let config = Config::from_map(map);
+
+        assert!(config.which_key_starts_hidden(InputMode::Scroll));
+        assert!(config.which_key_starts_hidden(InputMode::Search));
+        assert!(config.which_key_starts_hidden(InputMode::EnterSearch));
+        assert!(!config.which_key_starts_hidden(InputMode::Pane));
+        assert_eq!(config.which_key_toggle_key.as_deref(), Some("\u{F0635} ."));
     }
 
     #[test]

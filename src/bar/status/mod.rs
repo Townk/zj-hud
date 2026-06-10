@@ -142,6 +142,20 @@ pub fn search_hint_segment(
     Segment { text, width, bg }
 }
 
+/// Build the WhichKey-hidden hint segment: the configured toggle key in bright
+/// white, then `keys` in `dark` (the previous mode-hint/background color).
+pub fn which_key_hidden_hint_segment(bg: Color, dark: Color, toggle_key: &str) -> Segment {
+    let plain = format!(" {toggle_key} keys ");
+    let width = UnicodeWidthStr::width(plain.as_str());
+    let text = format!(
+        "{bg}{on} {toggle_key} {dark}keys ",
+        bg = bg.to_ansi_bg(),
+        on = HINT_GLYPH_ON.to_ansi_fg(),
+        dark = dark.to_ansi_fg(),
+    );
+    Segment { text, width, bg }
+}
+
 // ─── Session segment ──────────────────────────────────────────────────────────
 
 /// Returns a segment for the session name, or `None` if it's the default.
@@ -413,6 +427,18 @@ mod tests {
         assert!(seg.text.contains("case"));
         assert!(seg.text.contains("word"));
         assert!(seg.text.contains("wrap"));
+    }
+
+    #[test]
+    fn which_key_hidden_hint_renders_toggle_key_and_label() {
+        let seg = which_key_hidden_hint_segment(
+            Color::new(120, 60, 60),
+            Color::new(80, 40, 40),
+            "\u{F0635} .",
+        );
+        assert!(seg.text.contains("\u{F0635} ."));
+        assert!(seg.text.contains("keys"));
+        assert_eq!(seg.width, UnicodeWidthStr::width(" \u{F0635} . keys "));
     }
 
     #[test]

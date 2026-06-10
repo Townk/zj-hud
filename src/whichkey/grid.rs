@@ -678,6 +678,8 @@ mod tests {
             key: "\u{1b}[38;5;1m".into(),
             label: "\u{1b}[38;5;2m".into(),
             switch: "\u{1b}[38;5;4m".into(),
+            border: "\u{1b}[38;5;5m".into(),
+            footer: "\u{1b}[38;5;6m".into(),
             dim: "\u{1b}[2m".into(),
             reset: "\u{1b}[0m".into(),
         };
@@ -717,6 +719,8 @@ mod tests {
             key: "\u{1b}[38;5;1m".into(),
             label: "\u{1b}[38;5;2m".into(),
             switch: "\u{1b}[38;5;4m".into(),
+            border: "\u{1b}[38;5;5m".into(),
+            footer: "\u{1b}[38;5;6m".into(),
             dim: "\u{1b}[2m".into(),
             reset: "\u{1b}[0m".into(),
         };

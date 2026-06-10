@@ -558,8 +558,14 @@ impl State {
             // Fall back to the new mode itself as base when none was reported,
             // matching native behaviour for sessions with the default base.
             let base_mode = self.base_mode.unwrap_or(InputMode::Normal);
+            let initial_suppressed = self.config.which_key_starts_hidden(mode);
             self.with_active_shared_state(|shared, _| {
-                shared.publish_mode_update(mode, base_mode, get_plugin_ids().plugin_id)
+                shared.publish_mode_update(
+                    mode,
+                    base_mode,
+                    initial_suppressed,
+                    get_plugin_ids().plugin_id,
+                )
             });
         } else {
             self.sync_from_shared_state();
@@ -803,6 +809,10 @@ impl State {
             self.app.search_case_sensitive = shared.search_case_sensitive;
             self.app.search_whole_word = shared.search_whole_word;
             self.app.search_wrap = shared.search_wrap;
+            changed = true;
+        }
+        if self.app.which_key_suppressed != shared.suppressed {
+            self.app.which_key_suppressed = shared.suppressed;
             changed = true;
         }
         let rename_mode = shared_state::str_to_mode(shared.rename_mode.as_str())

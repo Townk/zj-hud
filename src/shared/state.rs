@@ -12,11 +12,14 @@
 //!   the single source of truth for the mode glyph/color/label set;
 //!   `which_key_config` and `search_config` carry the raw `which_key { … }` /
 //!   `search { … }` blocks (authored once on the bar) to the panel and the
-//!   search dialog, so those roles need no geometry config of their own.
+//!   search dialog, so those roles need no geometry config of their own. On
+//!   real mode changes, the Bar also resets `suppressed` to the WhichKey
+//!   configured initial state for the entered mode.
 //! - `search_active` / `search_case_sensitive` / `search_whole_word` /
 //!   `search_wrap` — the **Search** role.
 //! - `rename_active` / `rename_mode` — the **Rename** role.
-//! - `suppressed` / `page` — the **WhichKey** role.
+//! - `suppressed` / `page` — the **WhichKey** role after mode entry (manual
+//!   hide/show and paging).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -163,16 +166,19 @@ impl SharedState {
     /// active Bar. Mirrors native which-key behaviour: returning to the base
     /// mode clears the trail; re-entering the last trail mode pops it; otherwise
     /// the mode we left is pushed unless it was a resting mode (see
-    /// [`RESTING_MODES`]). Resets `page` on any real mode change. No-ops
-    /// (returning `self` unbumped) when nothing observable changed.
+    /// [`RESTING_MODES`]). Resets `page` and the WhichKey suppression state on
+    /// any real mode change. No-ops (returning `self` unbumped) when nothing
+    /// observable changed.
     pub fn publish_mode_update(
         mut self,
         new_mode: InputMode,
         base_mode: InputMode,
+        initial_suppressed: bool,
         writer: u32,
     ) -> Self {
         let old_page = self.page;
         let old_mode = self.mode();
+        let mode_changed = old_mode != new_mode;
         let mut backstack = self.backstack();
 
         if new_mode == base_mode {
@@ -199,6 +205,9 @@ impl SharedState {
         self.base_mode = next_base_mode;
         self.backstack = next_backstack;
         self.page = 0;
+        if mode_changed {
+            self.suppressed = initial_suppressed;
+        }
         self.bump(writer);
         self
     }
@@ -409,12 +418,12 @@ mod tests {
     #[test]
     fn mode_transition_pushes_and_pops_backstack() {
         let state = SharedState::default()
-            .publish_mode_update(InputMode::Pane, InputMode::Normal, 1)
-            .publish_mode_update(InputMode::Tab, InputMode::Normal, 1);
+            .publish_mode_update(InputMode::Pane, InputMode::Normal, false, 1)
+            .publish_mode_update(InputMode::Tab, InputMode::Normal, false, 1);
         assert_eq!(state.mode(), InputMode::Tab);
         assert_eq!(state.backstack(), vec![InputMode::Pane]);
 
-        let state = state.publish_mode_update(InputMode::Pane, InputMode::Normal, 1);
+        let state = state.publish_mode_update(InputMode::Pane, InputMode::Normal, false, 1);
         assert_eq!(state.mode(), InputMode::Pane);
         assert!(state.backstack().is_empty());
     }
@@ -422,15 +431,16 @@ mod tests {
     #[test]
     fn same_mode_update_preserves_backstack_and_generation() {
         let state = SharedState::default()
-            .publish_mode_update(InputMode::Tmux, InputMode::Normal, 1)
-            .publish_mode_update(InputMode::Tab, InputMode::Normal, 1);
+            .publish_mode_update(InputMode::Tmux, InputMode::Normal, false, 1)
+            .publish_mode_update(InputMode::Tab, InputMode::Normal, false, 1);
         let generation = state.generation;
 
-        let state = state.publish_mode_update(InputMode::Tab, InputMode::Normal, 2);
+        let state = state.publish_mode_update(InputMode::Tab, InputMode::Normal, true, 2);
         assert_eq!(state.mode(), InputMode::Tab);
         assert_eq!(state.backstack(), vec![InputMode::Tmux]);
         assert_eq!(state.generation, generation);
         assert_eq!(state.writer, 1);
+        assert!(!state.suppressed);
     }
 
     #[test]
@@ -442,11 +452,12 @@ mod tests {
             page: 2,
             ..SharedState::default()
         }
-        .publish_mode_update(InputMode::Normal, InputMode::Normal, 1);
+        .publish_mode_update(InputMode::Normal, InputMode::Normal, false, 1);
 
         assert_eq!(state.mode(), InputMode::Normal);
         assert!(state.backstack().is_empty());
         assert_eq!(state.page, 0);
+        assert!(!state.suppressed);
     }
 
     #[test]
@@ -457,9 +468,22 @@ mod tests {
             base_mode: "Normal".to_string(),
             ..SharedState::default()
         }
-        .publish_mode_update(InputMode::Scroll, InputMode::Normal, 1);
+        .publish_mode_update(InputMode::Scroll, InputMode::Normal, false, 1);
         assert_eq!(state.mode(), InputMode::Scroll);
         assert!(state.backstack().is_empty());
+    }
+
+    #[test]
+    fn mode_transition_sets_initial_suppression() {
+        let state = SharedState {
+            suppressed: false,
+            ..SharedState::default()
+        }
+        .publish_mode_update(InputMode::Scroll, InputMode::Normal, true, 1);
+        assert!(state.suppressed);
+
+        let state = state.publish_mode_update(InputMode::Pane, InputMode::Normal, false, 1);
+        assert!(!state.suppressed);
     }
 
     #[test]

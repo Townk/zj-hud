@@ -117,6 +117,16 @@ in [`docs/specs/reverse-eng-spec.md`](docs/specs/reverse-eng-spec.md) and the
 [design spec](docs/superpowers/specs/2026-05-26-zj-hud-design.md); start from
 the status bar above and layer the companion roles in from there.
 
+To have which-key start hidden for specific modes, add a mode list to the bar's
+`which_key` block. Manual show/hide still works inside that mode until the next
+mode transition:
+
+```kdl
+which_key {
+    start_hidden "scroll"
+}
+```
+
 > On first load Zellij prompts once to approve the plugin's permissions. All
 > roles request the same (union) permission set so the grant is cached per URL
 > and you're never re-prompted.

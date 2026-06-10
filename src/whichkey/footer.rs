@@ -32,11 +32,11 @@ const GAP: usize = 2;
 /// the `_w` fields are the **visible** widths (used for sizing + right-align).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Footer {
-    /// Close + scroll hints, already colored (bindings bright white, words dim).
+    /// Close + scroll hints, already colored (key glyphs bright, labels grey).
     pub left: String,
     /// Visible width of `left`.
     pub left_w: usize,
-    /// `"N/M"` page counter, colored dim — right-aligned by the renderer.
+    /// `"N/M"` page counter, colored as footer chrome — right-aligned by the renderer.
     pub counter: Option<String>,
     /// Visible width of the counter.
     pub counter_w: usize,
@@ -55,9 +55,8 @@ impl Footer {
     }
 }
 
-/// Build the footer, or `None` if there's nothing to show. Bindings are tinted
-/// with `theme.key` (bright white); the surrounding words and the page counter
-/// use `theme.dim`.
+/// Build the footer, or `None` if there's nothing to show. Binding glyphs use
+/// the bright key color; the label words and page counter use the footer grey.
 pub fn build(
     keybinds: &[(KeyWithModifier, Vec<Action>)],
     base_mode: InputMode,
@@ -83,8 +82,9 @@ pub fn build(
     }
 
     // The toggle key can't be auto-discovered (its pipe name is stripped from
-    // the keymap), so it's surfaced only when configured.
-    if let Some(toggle) = &config.toggle_key {
+    // the keymap), so it's surfaced only when configured. Use the spaced label
+    // form here so multi-glyph chords read like the status-bar hint.
+    if let Some(toggle) = &config.toggle_key_label {
         segs.push((toggle.clone(), "hide"));
     }
 
@@ -102,7 +102,7 @@ pub fn build(
         }
     }
 
-    let (key, dim, reset) = (&theme.key, &theme.dim, &theme.reset);
+    let (key, footer, reset) = (&theme.key, &theme.footer, &theme.reset);
     let mut left = String::new();
     let mut left_w = 0usize;
     for (i, (glyphs, word)) in segs.iter().enumerate() {
@@ -110,15 +110,14 @@ pub fn build(
             left.push_str(&" ".repeat(GAP));
             left_w += GAP;
         }
-        // Binding glyphs bright white; the trailing " word" dim.
-        left.push_str(&format!("{key}{glyphs}{reset}{dim} {word}{reset}"));
+        left.push_str(&format!("{key}{glyphs}{reset}{footer} {word}{reset}"));
         left_w += glyphs.chars().count() + 1 + word.chars().count();
     }
 
     let (counter, counter_w) = if page_count > 1 {
         let text = format!("{}/{}", page + 1, page_count);
         let w = text.chars().count();
-        (Some(format!("{dim}{text}{reset}")), w)
+        (Some(format!("{footer}{text}{reset}")), w)
     } else {
         (None, 0)
     };
@@ -192,6 +191,7 @@ mod tests {
                 input_mode: InputMode::Normal,
             }],
         )];
+        let theme = Theme::default();
         let f = build(
             &kb,
             InputMode::Normal,
@@ -199,11 +199,15 @@ mod tests {
             1,
             false,
             &Config::default(),
-            &Theme::default(),
+            &theme,
         )
         .unwrap();
         assert!(f.left.contains("close"));
         assert!(f.left.contains('\u{F12B7}')); // Esc glyph 󱊷
+        assert!(f.left.contains(&format!(
+            "{}{}{}{} close{}",
+            theme.key, '\u{F12B7}', theme.reset, theme.footer, theme.reset
+        )));
         assert!(f.counter.is_none()); // single page → no counter
     }
 
@@ -260,7 +264,8 @@ mod tests {
         assert!(!f.left.contains("hide"));
         // Set → `<glyph> hide` shows.
         let config = Config {
-            toggle_key: Some("\u{F0635}.".into()), // 󰘵.
+            toggle_key: Some("\u{F0635}.".into()),        // 󰘵.
+            toggle_key_label: Some("\u{F0635} .".into()), // 󰘵 .
             ..Config::default()
         };
         let f = build(
@@ -274,7 +279,8 @@ mod tests {
         )
         .unwrap();
         assert!(f.left.contains("hide"));
-        assert!(f.left.contains("\u{F0635}."));
+        assert!(f.left.contains("\u{F0635} ."));
+        assert!(!f.left.contains("\u{F0635}."));
     }
 
     #[test]

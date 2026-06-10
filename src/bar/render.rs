@@ -7,7 +7,8 @@ use crate::bar::state::AppState;
 use crate::bar::status::system;
 use crate::bar::status::{
     divider, divider_width, info_widgets_segment, locked_hint_segment, mode_segment,
-    search_hint_segment, session_segment, time_segment, InfoWidgetsResult, Segment,
+    search_hint_segment, session_segment, time_segment, which_key_hidden_hint_segment,
+    InfoWidgetsResult, Segment,
 };
 use crate::bar::tabs::layout::{compute_tab_layout, CHEVRON_TAB_WIDTH};
 use crate::bar::tabs::{compose_tab_title, render_tab_title};
@@ -261,7 +262,10 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     // ── Mode hint segment (Locked exit hint / Search options) ──────────────
     // Sits directly right of the mode indicator. Only Locked and Search carry a
     // hint, and both are non-Normal, so `mode_present` is always true here.
-    let hint_present = matches!(effective_mode, InputMode::Locked | InputMode::Search);
+    let mode_hint_present = matches!(effective_mode, InputMode::Locked | InputMode::Search);
+    let which_key_hint_present = state.which_key_suppressed
+        && !matches!(effective_mode, InputMode::Normal | InputMode::Locked)
+        && config.which_key_toggle_key.is_some();
 
     // ── Info widgets segment (None unless `system_info` is configured) ─────
     let system_info_block =
@@ -286,7 +290,8 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     let widgets_present = widgets_segment_probe.is_some();
 
     let segment_count = mode_present as usize
-        + hint_present as usize
+        + mode_hint_present as usize
+        + which_key_hint_present as usize
         + session_present as usize
         + widgets_present as usize
         + time_present as usize;
@@ -318,7 +323,10 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     if mode_present {
         specs.push(next_spec());
     }
-    if hint_present {
+    if mode_hint_present {
+        specs.push(next_spec());
+    }
+    if which_key_hint_present {
         specs.push(next_spec());
     }
     if session_present {
@@ -353,7 +361,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
             built.push(Built::Mode(seg));
         }
     }
-    if hint_present {
+    if mode_hint_present {
         let bg = spec_iter.next().unwrap();
         let seg = match effective_mode {
             InputMode::Locked => locked_hint_segment(bg, mode_bg),
@@ -366,6 +374,14 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
             ),
         };
         built.push(Built::Hint(seg));
+    }
+    if which_key_hint_present {
+        let bg = spec_iter.next().unwrap();
+        let key = config
+            .which_key_toggle_key
+            .as_deref()
+            .expect("which_key_toggle_key present");
+        built.push(Built::Hint(which_key_hidden_hint_segment(bg, mode_bg, key)));
     }
     if session_present {
         let bg = spec_iter.next().unwrap();
@@ -529,6 +545,41 @@ mod tests {
         assert!(right.text.contains("case"));
         assert!(right.text.contains("word"));
         assert!(right.text.contains("wrap"));
+    }
+
+    #[test]
+    fn suppressed_which_key_shows_toggle_hint() {
+        let state = AppState {
+            mode: InputMode::Scroll,
+            which_key_suppressed: true,
+            session_name: "main".to_string(),
+            ..AppState::default()
+        };
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "which_key".to_string(),
+            r#"
+toggle_key "Alt ."
+"#
+            .to_string(),
+        );
+        let config = Config::from_map(map);
+        let right = build_right_side(&state, &config, 80);
+        assert!(right.text.contains("\u{F0635} .")); // Alt+.
+        assert!(right.text.contains("keys"));
+    }
+
+    #[test]
+    fn suppressed_which_key_hint_requires_configured_toggle_key() {
+        let state = AppState {
+            mode: InputMode::Scroll,
+            which_key_suppressed: true,
+            session_name: "main".to_string(),
+            ..AppState::default()
+        };
+        let config = Config::default();
+        let right = build_right_side(&state, &config, 80);
+        assert!(!right.text.contains("keys"));
     }
 
     #[test]

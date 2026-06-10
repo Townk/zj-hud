@@ -8,7 +8,7 @@
 //! We draw our **own** rounded frame (the pane is set borderless) so the title
 //! is just the mode symbol — Zellij's native frame would also stamp its
 //! `SCROLL`/`PIN` indicators, which we don't want. The frame and chrome are
-//! colored from the palette [`Theme`]; the mode symbol takes the accent.
+//! colored from [`Theme`]; the mode symbol takes the accent.
 
 use crate::shared::geometry::Padding;
 use crate::whichkey::footer::Footer;
@@ -65,7 +65,8 @@ pub fn paint(
     if rows == 0 || cols == 0 {
         return out;
     }
-    let dim = &theme.dim;
+    let border = &theme.border;
+    let footer_chrome = &theme.footer;
     let reset = &theme.reset;
 
     let blank = " ".repeat(cols);
@@ -74,7 +75,7 @@ pub fn paint(
     }
 
     // Top border with the mode breadcrumb (pre-colored): ╭ <a » b> ─╮
-    out.push_str(&format!("\u{1b}[1;1H{dim}{TL} {reset}{title}{dim} "));
+    out.push_str(&format!("\u{1b}[1;1H{border}{TL} {reset}{title}{border} "));
     let used = 2 + title_w + 1; // "╭ " + breadcrumb + " "
     let dashes = cols.saturating_sub(used + 1); // +1 for the ╮
     out.push_str(&HBAR.repeat(dashes));
@@ -83,15 +84,15 @@ pub fn paint(
     // Bottom border: ╰─────╯
     if rows >= 2 {
         out.push_str(&format!(
-            "\u{1b}[{rows};1H{dim}{BL}{}{BR}{reset}",
+            "\u{1b}[{rows};1H{border}{BL}{}{BR}{reset}",
             HBAR.repeat(cols.saturating_sub(2))
         ));
     }
 
     // Side borders down the interior rows.
     for row in 2..rows {
-        out.push_str(&format!("\u{1b}[{row};1H{dim}{VBAR}{reset}"));
-        out.push_str(&format!("\u{1b}[{row};{cols}H{dim}{VBAR}{reset}"));
+        out.push_str(&format!("\u{1b}[{row};1H{border}{VBAR}{reset}"));
+        out.push_str(&format!("\u{1b}[{row};{cols}H{border}{VBAR}{reset}"));
     }
 
     // Interior: the inner `pad` insets content from the frame. Content starts
@@ -117,7 +118,7 @@ pub fn paint(
             // so the rule lines up with the body and footer rather than the frame.
             let sep_w = cols.saturating_sub(2 + pad.left + pad.right);
             out.push_str(&format!(
-                "\u{1b}[{sep_row};{content_col}H{dim}{}{reset}",
+                "\u{1b}[{sep_row};{content_col}H{footer_chrome}{}{reset}",
                 SEP_CHAR.repeat(sep_w)
             ));
         }
@@ -199,8 +200,8 @@ mod tests {
         assert!(out.contains("M")); // mode symbol title
         assert!(out.contains("\u{1b}[2;3Ha")); // body starts on row 2, past border+pad
         assert!(out.contains("\u{1b}[3;3Hb"));
-        assert!(out.contains(&format!("\u{1b}[4;1H{}{BL}", theme.dim))); // bottom border
-                                                                         // No bare newlines.
+        assert!(out.contains(&format!("\u{1b}[4;1H{}{BL}", theme.border))); // bottom border
+                                                                            // No bare newlines.
         assert!(!out.contains('\n'));
     }
 
@@ -217,7 +218,7 @@ mod tests {
             &frame(&theme, pad()),
         );
         assert!(out.contains("\u{1b}[2;3Ha")); // body row 2
-        assert!(out.contains("\u{1b}[3;3H")); // separator row 3 (inset by left pad)
+        assert!(out.contains(&format!("\u{1b}[3;3H{}", theme.footer))); // separator row 3
         assert!(out.contains("\u{1b}[4;3H")); // footer row 4
         assert!(out.contains("x close"));
         assert!(out.contains(BR)); // bottom-right corner present
