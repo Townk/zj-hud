@@ -44,7 +44,7 @@ to use the plugin. Two stable download URLs are published:
 | URL | Tracks |
 |---|---|
 | `https://github.com/Townk/zj-hud/releases/download/latest/zj-hud.wasm` | The **rolling build** — refreshed on every push to `master`. |
-| `https://github.com/Townk/zj-hud/releases/download/v0.1.0/zj-hud.wasm` | A **pinned version** — immutable once published. |
+| `https://github.com/Townk/zj-hud/releases/download/v0.1.1/zj-hud.wasm` | A **pinned version** — immutable once published. |
 
 Zellij can load a plugin straight from a URL and caches it locally, so you can
 reference the release asset directly in your layout/config. For a stable local
