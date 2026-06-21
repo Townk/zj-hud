@@ -13,8 +13,15 @@ repo := "Townk/zj-hud"
 # Default to the dev loop: build + reload in the running Zellij session.
 default: reload
 
+# Ensure the wasm target Zellij loads is installed in the active toolchain.
+# `rust-toolchain.toml` pins `wasm32-wasip1`, but rustup doesn't always
+# auto-install targets from that file, so a plain `just build` can fail with
+# `can't find crate for core` until the target is added once.
+target:
+    rustup target list --installed | grep -q '^wasm32-wasip1$' || rustup target add wasm32-wasip1
+
 # Build the plugin in release mode for Zellij's wasm target.
-build:
+build: target
     cargo build --release --target wasm32-wasip1
 
 # Build, then hot-reload the running plugin (and close the spurious side pane).
@@ -41,7 +48,7 @@ test:
     cargo test
 
 # Lint with clippy on both the wasm build and the test build.
-lint:
+lint: target
     cargo clippy --target wasm32-wasip1 -- -D warnings
     cargo clippy --tests -- -D warnings
 
@@ -89,6 +96,9 @@ release version:
         echo "error: local master is not in sync with origin/master; pull/push first" >&2
         exit 1
     fi
+
+    # Ensure the wasm target is installed before the quality gate needs it.
+    rustup target list --installed | grep -q '^wasm32-wasip1$' || rustup target add wasm32-wasip1
 
     # Quality gate before mutating anything.
     cargo fmt --all -- --check
