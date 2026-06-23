@@ -1,6 +1,6 @@
 [package]
 name = "zj-hud"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A Zellij HUD plugin with a status bar, which-key panel, and visual search dialog"
 license = "MIT"
