@@ -33,6 +33,19 @@ const BORDER_BLUE: &str = SWITCH_BLUE;
 /// Footer chrome: grey (`#6C7086`).
 const FOOTER_GREY: &str = "\u{1b}[38;2;108;112;134m";
 
+/// Optional chrome-color overrides parsed from the which-key config. Each is a
+/// ready-to-emit SGR foreground sequence (as produced by [`parse_color`]); a
+/// `None` keeps the fixed default for that role. `dim` is intentionally absent:
+/// it always tracks the live palette (see [`Theme::from_style`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChromeColors {
+    pub key: Option<String>,
+    pub label: Option<String>,
+    pub switch: Option<String>,
+    pub border: Option<String>,
+    pub footer: Option<String>,
+}
+
 /// SGR foreground sequences for each interior region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
@@ -75,6 +88,33 @@ impl Theme {
         Self {
             dim: format!("{FAINT}{}", sgr_fg(text.base)),
             ..Self::default()
+        }
+    }
+
+    /// Like [`Self::from_style`], but overlays any configured chrome overrides
+    /// on top of the fixed defaults. Each provided override replaces its
+    /// default; `dim` still tracks the live palette.
+    pub fn from_style_and_colors(style: &Style, colors: &ChromeColors) -> Self {
+        let mut theme = Self::from_style(style);
+        theme.apply_chrome(colors);
+        theme
+    }
+
+    fn apply_chrome(&mut self, colors: &ChromeColors) {
+        if let Some(key) = &colors.key {
+            self.key = key.clone();
+        }
+        if let Some(label) = &colors.label {
+            self.label = label.clone();
+        }
+        if let Some(switch) = &colors.switch {
+            self.switch = switch.clone();
+        }
+        if let Some(border) = &colors.border {
+            self.border = border.clone();
+        }
+        if let Some(footer) = &colors.footer {
+            self.footer = footer.clone();
         }
     }
 }
@@ -131,6 +171,54 @@ mod tests {
         assert_eq!(t.border, BORDER_BLUE);
         assert_eq!(t.footer, FOOTER_GREY);
         assert_eq!(t.dim, "\u{1b}[2m\u{1b}[38;5;7m");
+    }
+
+    #[test]
+    fn from_style_and_colors_overrides_replace_defaults() {
+        let mut style = Style::default();
+        style.colors.text_unselected.base = PaletteColor::EightBit(7);
+        let colors = ChromeColors {
+            key: parse_color("#ffffff"),
+            label: parse_color("#F5C2E7"),
+            switch: parse_color("#89B4FA"),
+            border: parse_color("#a6e3a1"),
+            footer: parse_color("5"),
+        };
+        let t = Theme::from_style_and_colors(&style, &colors);
+        assert_eq!(t.key, "\u{1b}[38;2;255;255;255m");
+        assert_eq!(t.label, "\u{1b}[38;2;245;194;231m");
+        assert_eq!(t.switch, "\u{1b}[38;2;137;180;250m");
+        assert_eq!(t.border, "\u{1b}[38;2;166;227;161m");
+        assert_eq!(t.footer, "\u{1b}[38;5;5m");
+        // dim still tracks the live palette, never the overrides.
+        assert_eq!(t.dim, "\u{1b}[2m\u{1b}[38;5;7m");
+    }
+
+    #[test]
+    fn from_style_and_colors_absent_overrides_keep_defaults() {
+        let mut style = Style::default();
+        style.colors.text_unselected.base = PaletteColor::EightBit(7);
+        // Only override the border; the rest keep their fixed defaults.
+        let colors = ChromeColors {
+            border: parse_color("#a6e3a1"),
+            ..ChromeColors::default()
+        };
+        let t = Theme::from_style_and_colors(&style, &colors);
+        assert_eq!(t.key, KEY_WHITE);
+        assert_eq!(t.label, LABEL_PINK);
+        assert_eq!(t.switch, SWITCH_BLUE);
+        assert_eq!(t.border, "\u{1b}[38;2;166;227;161m");
+        assert_eq!(t.footer, FOOTER_GREY);
+        assert_eq!(t.dim, "\u{1b}[2m\u{1b}[38;5;7m");
+    }
+
+    #[test]
+    fn from_style_and_colors_default_matches_from_style() {
+        let style = Style::default();
+        assert_eq!(
+            Theme::from_style_and_colors(&style, &ChromeColors::default()),
+            Theme::from_style(&style)
+        );
     }
 
     #[test]

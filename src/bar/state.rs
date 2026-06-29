@@ -109,6 +109,12 @@ impl WidgetState {
 
 pub struct AppState {
     pub mode: InputMode,
+    /// Latest live Zellij theme, captured from `ModeInfo::style` on every
+    /// `ModeUpdate`. The bar background follows
+    /// `style.colors.text_unselected.background` (unless `bar_bg` overrides it),
+    /// so a regenerated theme recolors the bar without a layout edit. `None`
+    /// until the first `ModeUpdate`, when the bar falls back to `DEFAULT_BAR_BG`.
+    pub style: Option<Style>,
     /// Mirror of the shared `search_active` flag, written by the floating
     /// search pane while its dialog is open and delivered to the bar through
     /// the `SharedState` broadcast. The dialog keeps the *client* in `Normal`
@@ -179,6 +185,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             mode: InputMode::Normal,
+            style: None,
             search_active: false,
             search_case_sensitive: false,
             search_whole_word: false,

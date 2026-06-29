@@ -741,7 +741,7 @@ impl WhichKeyPane {
         self.mode = self.last_shared.mode();
         self.base_mode = self.last_shared.base_mode();
         if let Some(mode_info) = &self.mode_info {
-            self.theme = Theme::from_style(&mode_info.style);
+            self.theme = Theme::from_style_and_colors(&mode_info.style, &self.config.chrome);
             self.keybinds = mode_info.get_keybinds_for_mode(self.mode);
         }
     }

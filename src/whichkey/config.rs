@@ -10,7 +10,7 @@ use crate::whichkey::labels::{
     ModeLabels,
 };
 use crate::whichkey::modes::{group_members, mode_color, mode_icon, str_to_mode};
-use crate::whichkey::theme::parse_color;
+use crate::whichkey::theme::{parse_color, ChromeColors};
 
 /// Grid fill order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +75,12 @@ pub struct Config {
     /// a mode is named, such as `Command …` switch entries.
     pub mode_labels: ModeLabels,
 
+    /// Panel chrome color overrides (`key`/`label`/`switch`/`border`/`footer`),
+    /// each a ready-to-emit SGR foreground sequence. Applied over the fixed
+    /// theme defaults in [`crate::whichkey::theme::Theme::from_style_and_colors`];
+    /// `dim` is never overridden here (it tracks the live palette).
+    pub chrome: ChromeColors,
+
     /// Binding groups that render contiguously in the configured member order
     /// (anchored at each group's first member), optionally scoped to one or more
     /// modes.
@@ -118,6 +124,7 @@ impl Default for Config {
             mode_symbols: BTreeMap::new(),
             mode_colors: BTreeMap::new(),
             mode_labels: ModeLabels::new(),
+            chrome: ChromeColors::default(),
             groups: Vec::new(),
             debug_log: None,
             state_log: None,
@@ -196,6 +203,16 @@ impl Config {
             config.mode_colors = colors;
             config.mode_labels = labels;
         }
+        // Panel chrome overrides: each parses a `#RGB`/`#RRGGBB` hex or
+        // 256-color index into an SGR sequence; an unparseable value is dropped
+        // so the fixed theme default stands.
+        config.chrome = ChromeColors {
+            key: map.get("key").and_then(|s| parse_color(s)),
+            label: map.get("label").and_then(|s| parse_color(s)),
+            switch: map.get("switch").and_then(|s| parse_color(s)),
+            border: map.get("border").and_then(|s| parse_color(s)),
+            footer: map.get("footer").and_then(|s| parse_color(s)),
+        };
         if let Some(block) = map.get("groups") {
             config.groups = parse_groups_block(block);
         }
@@ -874,6 +891,57 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("binding_separator".into(), "|".into());
         assert_eq!(Config::from_map(&m).binding_separator, "|");
+    }
+
+    #[test]
+    fn chrome_colors_default_to_none() {
+        assert_eq!(Config::default().chrome, ChromeColors::default());
+    }
+
+    #[test]
+    fn chrome_colors_parse_from_map() {
+        let mut m = BTreeMap::new();
+        m.insert("key".into(), "#ffffff".into());
+        m.insert("label".into(), "#F5C2E7".into());
+        m.insert("switch".into(), "#89B4FA".into());
+        m.insert("border".into(), "#6C7086".into());
+        m.insert("footer".into(), "5".into()); // 256-color index
+        let c = Config::from_map(&m);
+        assert_eq!(c.chrome.key.as_deref(), Some("\u{1b}[38;2;255;255;255m"));
+        assert_eq!(c.chrome.label.as_deref(), Some("\u{1b}[38;2;245;194;231m"));
+        assert_eq!(c.chrome.switch.as_deref(), Some("\u{1b}[38;2;137;180;250m"));
+        assert_eq!(c.chrome.border.as_deref(), Some("\u{1b}[38;2;108;112;134m"));
+        assert_eq!(c.chrome.footer.as_deref(), Some("\u{1b}[38;5;5m"));
+    }
+
+    #[test]
+    fn chrome_colors_invalid_are_dropped() {
+        let mut m = BTreeMap::new();
+        m.insert("key".into(), "nope".into());
+        m.insert("border".into(), "#12".into());
+        let c = Config::from_map(&m);
+        // Unparseable colors fall back to None → the theme keeps its default.
+        assert_eq!(c.chrome.key, None);
+        assert_eq!(c.chrome.border, None);
+    }
+
+    #[test]
+    fn chrome_colors_round_trip_through_from_block() {
+        // The bar forwards the `which_key { … }` block verbatim, so chrome keys
+        // must survive `from_block` (one node per line → from_map).
+        let block = r##"
+            key "#ffffff"
+            label "#F5C2E7"
+            switch "#89B4FA"
+            border "#89B4FA"
+            footer "#6C7086"
+        "##;
+        let c = Config::from_block(block);
+        assert_eq!(c.chrome.key.as_deref(), Some("\u{1b}[38;2;255;255;255m"));
+        assert_eq!(c.chrome.label.as_deref(), Some("\u{1b}[38;2;245;194;231m"));
+        assert_eq!(c.chrome.switch.as_deref(), Some("\u{1b}[38;2;137;180;250m"));
+        assert_eq!(c.chrome.border.as_deref(), Some("\u{1b}[38;2;137;180;250m"));
+        assert_eq!(c.chrome.footer.as_deref(), Some("\u{1b}[38;2;108;112;134m"));
     }
 
     #[test]

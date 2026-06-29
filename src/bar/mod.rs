@@ -206,6 +206,10 @@ impl State {
             Event::ModeUpdate(mode_info) => {
                 let mode = mode_info.mode;
 
+                // Capture the live theme so the bar background can track it
+                // (see `render::resolve_bar_bg`).
+                self.app.style = Some(mode_info.style);
+
                 // Update session name first so the file path is correct.
                 if let Some(name) = mode_info.session_name {
                     self.app.session_name = name;

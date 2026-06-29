@@ -83,13 +83,6 @@ pub fn mode_segment(mode: InputMode, bg: Color, config: &Config) -> Option<Segme
 
 // ─── Mode hint segments ────────────────────────────────────────────────────────
 
-/// Foreground for an "active"/keycap glyph in the mode-hint segments.
-const HINT_GLYPH_ON: Color = Color {
-    r: 255,
-    g: 255,
-    b: 255,
-};
-
 /// Keycap glyphs for the Locked-mode exit hint (Alt and Esc).
 const GLYPH_ALT: &str = "\u{F0635}";
 const GLYPH_ESC: &str = "\u{F12B7}";
@@ -99,27 +92,30 @@ const GLYPH_SEARCH_WORD: &str = "\u{EB7E}";
 const GLYPH_SEARCH_WRAP: &str = "\u{F0547}";
 
 /// Build the Locked-mode hint segment shown to the right of the mode indicator:
-/// the Alt and Esc keycap glyphs in bright white, then the word `exit` in
-/// `dark` (the mode indicator's background color). `bg` is the segment's own
-/// background; `dark` is the slightly-darker mode color used for the label.
-pub fn locked_hint_segment(bg: Color, dark: Color) -> Segment {
+/// the Alt and Esc keycap glyphs in `on` (the highlighted keycap color), then
+/// the word `exit` in `dark` (the mode indicator's background color). `bg` is
+/// the segment's own background; `dark` is the slightly-darker mode color used
+/// for the label.
+pub fn locked_hint_segment(bg: Color, dark: Color, on: Color) -> Segment {
     let plain = format!(" {GLYPH_ALT} {GLYPH_ESC}  exit ");
     let width = UnicodeWidthStr::width(plain.as_str());
     let text = format!(
         "{bg}{on} {GLYPH_ALT} {GLYPH_ESC}  {dark}exit ",
         bg = bg.to_ansi_bg(),
-        on = HINT_GLYPH_ON.to_ansi_fg(),
+        on = on.to_ansi_fg(),
         dark = dark.to_ansi_fg(),
     );
     Segment { text, width, bg }
 }
 
 /// Build the Search-mode hint segment: the words `case`, `word`, `wrap` in
-/// `dark`, each preceded by its glyph — bright white when that option is on,
-/// `dark` when off. `bg` is the segment background; `dark` is the mode color.
+/// `dark`, each preceded by its glyph — in `on` (the highlighted color) when
+/// that option is on, `dark` when off. `bg` is the segment background; `dark`
+/// is the mode color.
 pub fn search_hint_segment(
     bg: Color,
     dark: Color,
+    on: Color,
     case_on: bool,
     word_on: bool,
     wrap_on: bool,
@@ -128,7 +124,7 @@ pub fn search_hint_segment(
         format!(" {GLYPH_SEARCH_CASE} case  {GLYPH_SEARCH_WORD} word  {GLYPH_SEARCH_WRAP} wrap ");
     let width = UnicodeWidthStr::width(plain.as_str());
 
-    let on = HINT_GLYPH_ON.to_ansi_fg();
+    let on = on.to_ansi_fg();
     let dark_fg = dark.to_ansi_fg();
     let glyph_fg = |is_on: bool| if is_on { on.as_str() } else { dark_fg.as_str() };
     let text = format!(
@@ -142,15 +138,21 @@ pub fn search_hint_segment(
     Segment { text, width, bg }
 }
 
-/// Build the WhichKey-hidden hint segment: the configured toggle key in bright
-/// white, then `keys` in `dark` (the previous mode-hint/background color).
-pub fn which_key_hidden_hint_segment(bg: Color, dark: Color, toggle_key: &str) -> Segment {
+/// Build the WhichKey-hidden hint segment: the configured toggle key in `on`
+/// (the highlighted keycap color), then `keys` in `dark` (the previous
+/// mode-hint/background color).
+pub fn which_key_hidden_hint_segment(
+    bg: Color,
+    dark: Color,
+    on: Color,
+    toggle_key: &str,
+) -> Segment {
     let plain = format!(" {toggle_key} keys ");
     let width = UnicodeWidthStr::width(plain.as_str());
     let text = format!(
         "{bg}{on} {toggle_key} {dark}keys ",
         bg = bg.to_ansi_bg(),
-        on = HINT_GLYPH_ON.to_ansi_fg(),
+        on = on.to_ansi_fg(),
         dark = dark.to_ansi_fg(),
     );
     Segment { text, width, bg }
@@ -404,7 +406,11 @@ mod tests {
 
     #[test]
     fn locked_hint_renders_keycaps_and_exit() {
-        let seg = locked_hint_segment(Color::new(120, 60, 60), Color::new(80, 40, 40));
+        let seg = locked_hint_segment(
+            Color::new(120, 60, 60),
+            Color::new(80, 40, 40),
+            crate::bar::config::DEFAULT_HINT_GLYPH_ON,
+        );
         assert!(seg.text.contains(GLYPH_ALT));
         assert!(seg.text.contains(GLYPH_ESC));
         assert!(seg.text.contains("exit"));
@@ -415,9 +421,16 @@ mod tests {
     #[test]
     fn search_hint_highlights_only_active_options() {
         let dark = Color::new(40, 40, 80);
-        let on = HINT_GLYPH_ON.to_ansi_fg();
+        let on = crate::bar::config::DEFAULT_HINT_GLYPH_ON.to_ansi_fg();
         // Only `word` is on: its glyph must be white, case/wrap must be dark.
-        let seg = search_hint_segment(dark, dark, false, true, false);
+        let seg = search_hint_segment(
+            dark,
+            dark,
+            crate::bar::config::DEFAULT_HINT_GLYPH_ON,
+            false,
+            true,
+            false,
+        );
         let word_white = format!("{}{}", on, GLYPH_SEARCH_WORD);
         assert!(seg.text.contains(&word_white));
         let case_white = format!("{}{}", on, GLYPH_SEARCH_CASE);
@@ -434,6 +447,7 @@ mod tests {
         let seg = which_key_hidden_hint_segment(
             Color::new(120, 60, 60),
             Color::new(80, 40, 40),
+            crate::bar::config::DEFAULT_HINT_GLYPH_ON,
             "\u{F0635} .",
         );
         assert!(seg.text.contains("\u{F0635} ."));

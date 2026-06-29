@@ -3,6 +3,8 @@
 //! Provides hex parsing, ANSI escape codes, HSL darken/lighten,
 //! WCAG contrast ratio, and Oklab-based gradient generation.
 
+use zellij_tile::prelude::PaletteColor;
+
 // ─── Color struct ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +42,21 @@ impl Color {
                 Some(Color { r, g, b })
             }
             _ => None,
+        }
+    }
+
+    /// Resolve a Zellij [`PaletteColor`] to an RGB `Color`. Truecolor values
+    /// map directly; a 256-color index is resolved through the standard xterm
+    /// palette (system colors, the 6×6×6 cube, and the grayscale ramp). The
+    /// bar paints/blends in RGB (`to_ansi_bg`, Oklab gradient), so a live
+    /// `Style` background must be flattened to RGB here.
+    pub fn from_palette(color: PaletteColor) -> Color {
+        match color {
+            PaletteColor::Rgb((r, g, b)) => Color { r, g, b },
+            PaletteColor::EightBit(idx) => {
+                let (r, g, b) = eightbit_to_rgb(idx);
+                Color { r, g, b }
+            }
         }
     }
 
@@ -127,6 +144,45 @@ impl Color {
         let (h, s, l) = self.to_hsl();
         let l = (l + factor).min(1.0);
         Color::from_hsl(h, s, l)
+    }
+}
+
+// ─── 256-color → RGB ──────────────────────────────────────────────────────────
+
+/// The 16 ANSI system colors (indices 0–15), conventional xterm/VGA values.
+const ANSI_SYSTEM_RGB: [(u8, u8, u8); 16] = [
+    (0, 0, 0),
+    (128, 0, 0),
+    (0, 128, 0),
+    (128, 128, 0),
+    (0, 0, 128),
+    (128, 0, 128),
+    (0, 128, 128),
+    (192, 192, 192),
+    (128, 128, 128),
+    (255, 0, 0),
+    (0, 255, 0),
+    (255, 255, 0),
+    (0, 0, 255),
+    (255, 0, 255),
+    (0, 255, 255),
+    (255, 255, 255),
+];
+
+/// Map an xterm 256-color index to RGB: system colors (0–15), the 6×6×6 color
+/// cube (16–231), then the 24-step grayscale ramp (232–255).
+fn eightbit_to_rgb(idx: u8) -> (u8, u8, u8) {
+    match idx {
+        0..=15 => ANSI_SYSTEM_RGB[idx as usize],
+        16..=231 => {
+            let i = idx - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            (level(i / 36), level((i % 36) / 6), level(i % 6))
+        }
+        232..=255 => {
+            let v = 8 + (idx - 232) * 10;
+            (v, v, v)
+        }
     }
 }
 
@@ -338,6 +394,33 @@ mod tests {
         assert!(Color::parse_hex("#1234567").is_none());
         assert!(Color::parse_hex("#").is_none());
         assert!(Color::parse_hex("").is_none());
+    }
+
+    // ── from_palette ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_palette_rgb_passthrough() {
+        let c = Color::from_palette(PaletteColor::Rgb((30, 30, 46)));
+        assert_eq!(c, Color::new(30, 30, 46));
+    }
+
+    #[test]
+    fn from_palette_eightbit_ranges() {
+        // System color (index 1 = maroon).
+        assert_eq!(
+            Color::from_palette(PaletteColor::EightBit(1)),
+            Color::new(128, 0, 0)
+        );
+        // Color cube: index 196 = pure red (55 + 5*40 = 255).
+        assert_eq!(
+            Color::from_palette(PaletteColor::EightBit(196)),
+            Color::new(255, 0, 0)
+        );
+        // Grayscale ramp: index 238 (Zellij's default GRAY) = 8 + 6*10 = 68.
+        assert_eq!(
+            Color::from_palette(PaletteColor::EightBit(238)),
+            Color::new(68, 68, 68)
+        );
     }
 
     // ── ANSI ─────────────────────────────────────────────────────────────────

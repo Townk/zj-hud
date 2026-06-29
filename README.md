@@ -131,6 +131,54 @@ which_key {
 > roles request the same (union) permission set so the grant is cached per URL
 > and you're never re-prompted.
 
+### Theming the chrome
+
+The bar/tab chrome and the which-key panel chrome are configurable so they can
+follow a system palette. Every key is optional and accepts a `#RGB`/`#RRGGBB`
+hex color (the which-key chrome additionally accepts a bare 0–255 256-color
+index); an omitted or unparseable value keeps the built-in default, so the
+defaults below render an identical bar to leaving them unset. The one exception
+is `bar_bg`, which has no static default — when unset it follows the live Zellij
+theme (see below).
+
+Status-bar colors go on the bar `plugin` block — tab colors inside the
+`tabs { … }` block, the two bar-wide colors as top-level keys:
+
+```kdl
+plugin location="…/zj-hud.wasm" {
+    tabs {
+        bg        "#282c41"   // inactive tab background
+        fg        "#9b9fc1"   // inactive tab foreground
+        active_bg "#656a83"   // active tab background
+        active_fg "#ffffff"   // active tab foreground
+    }
+    bar_bg        "#1e1e2e"   // bar background override (unset → live theme)
+    hint_glyph_on "#ffffff"   // highlighted keycaps in mode-hint segments
+}
+```
+
+Unlike the other keys, `bar_bg` is an optional hard override with no static
+default: when unset, the bar background (gap fill, tab edges, gradient terminus)
+follows the live Zellij theme (`text_unselected.background`), so a regenerated
+theme recolors the bar with no layout edit. Set it only to pin the background
+regardless of the theme; the `#1e1e2e` above just reproduces the stock
+Catppuccin base.
+
+Which-key panel colors go in the `which_key { … }` block:
+
+```kdl
+which_key {
+    key    "#ffffff"   // body chord glyphs
+    label  "#f5c2e7"   // ordinary binding labels
+    switch "#89b4fa"   // labels for bindings that switch mode
+    border "#89b4fa"   // panel frame
+    footer "#6c7086"   // footer separator + key labels
+}
+```
+
+The panel's secondary `dim` chrome always tracks the live Zellij theme
+(`text_unselected`) and is not configured here.
+
 ## Build from source
 
 ```sh

@@ -29,6 +29,49 @@ pub const DEFAULT_TAB_MIN_SHRINK_WIDTH: usize = 20;
 pub const DEFAULT_TRUNCATION_POINT: f32 = 0.4;
 pub const DEFAULT_FULLSCREEN_MIN_COLS: usize = 120;
 pub const DEFAULT_SESSION_NAME: &str = "main";
+
+// ─── Bar / tab chrome colors ──────────────────────────────────────────────────
+// Defaults preserve the previously hardcoded palette so the bar looks identical
+// unless these keys are overridden.
+
+/// Inactive tab background.
+pub const DEFAULT_TAB_BG: Color = Color {
+    r: 40,
+    g: 44,
+    b: 65,
+};
+/// Inactive tab foreground.
+pub const DEFAULT_TAB_FG: Color = Color {
+    r: 155,
+    g: 159,
+    b: 193,
+};
+/// Active tab background.
+pub const DEFAULT_ACTIVE_TAB_BG: Color = Color {
+    r: 101,
+    g: 106,
+    b: 131,
+};
+/// Active tab foreground.
+pub const DEFAULT_ACTIVE_TAB_FG: Color = Color {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+/// Overall status-bar background (gap fill, tab edges, gradient terminus).
+pub const DEFAULT_BAR_BG: Color = Color {
+    r: 30,
+    g: 30,
+    b: 46,
+};
+/// Highlighted keycap glyphs in the mode-hint segments (e.g. the Alt/Esc exit
+/// hint, active search toggles, the which-key toggle hint).
+pub const DEFAULT_HINT_GLYPH_ON: Color = Color {
+    r: 255,
+    g: 255,
+    b: 255,
+};
+
 pub const DEFAULT_PROJECT_MARKERS: &[&str] = &[
     ".git",
     ".jj",
@@ -232,6 +275,21 @@ pub struct Config {
     pub tab_min_shrink_width: usize,
     pub tab_truncation_point: f32,
     pub tab_hide_single: bool,
+    /// Inactive tab background.
+    pub tab_bg: Color,
+    /// Inactive tab foreground.
+    pub tab_fg: Color,
+    /// Active tab background.
+    pub active_tab_bg: Color,
+    /// Active tab foreground.
+    pub active_tab_fg: Color,
+    /// Optional hard override for the overall status-bar background (gap fill,
+    /// tab edges, gradient terminus). `None` (the default) makes the background
+    /// follow the live Zellij theme (`style.colors.text_unselected.background`);
+    /// `Some` pins it regardless of the theme.
+    pub bar_bg: Option<Color>,
+    /// Highlighted keycap glyphs in the mode-hint segments.
+    pub hint_glyph_on: Color,
     pub fullscreen_min_cols: usize,
     pub fullscreen_command: Option<String>,
     pub fullscreen_initial_state: bool,
@@ -391,6 +449,12 @@ impl Default for Config {
             tab_min_shrink_width: DEFAULT_TAB_MIN_SHRINK_WIDTH,
             tab_truncation_point: DEFAULT_TRUNCATION_POINT,
             tab_hide_single: false,
+            tab_bg: DEFAULT_TAB_BG,
+            tab_fg: DEFAULT_TAB_FG,
+            active_tab_bg: DEFAULT_ACTIVE_TAB_BG,
+            active_tab_fg: DEFAULT_ACTIVE_TAB_FG,
+            bar_bg: None,
+            hint_glyph_on: DEFAULT_HINT_GLYPH_ON,
             fullscreen_min_cols: DEFAULT_FULLSCREEN_MIN_COLS,
             fullscreen_command: None,
             fullscreen_initial_state: false,
@@ -444,6 +508,17 @@ impl Config {
 
         if let Some(tabs) = map.get("tabs") {
             parse_tabs_block(tabs, &mut cfg);
+        }
+
+        // Bar-wide chrome colors. Tab colors live in the `tabs { … }` block
+        // (parsed above); these two are bar-scoped, not tab-scoped.
+        //
+        // `bar_bg` is an optional hard override: an absent or unparseable value
+        // leaves it `None`, so the background follows the live Zellij theme. A
+        // valid value pins it.
+        cfg.bar_bg = map.get("bar_bg").and_then(|v| Color::parse_hex(v));
+        if let Some(color) = map.get("hint_glyph_on").and_then(|v| Color::parse_hex(v)) {
+            cfg.hint_glyph_on = color;
         }
 
         if let Some(v) = map.get("fullscreen_min_cols") {
@@ -628,6 +703,10 @@ fn parse_tabs_block(value: &str, config: &mut Config) {
             "min_shrink_width",
             "truncation_point",
             "hide_single",
+            "bg",
+            "fg",
+            "active_bg",
+            "active_fg",
         ],
     ) else {
         return;
@@ -648,6 +727,18 @@ fn parse_tabs_block(value: &str, config: &mut Config) {
     }
     if let Some(hide_single) = document_value(&doc, "hide_single").and_then(|v| v.parse().ok()) {
         config.tab_hide_single = hide_single;
+    }
+    if let Some(bg) = document_value(&doc, "bg").and_then(|v| Color::parse_hex(&v)) {
+        config.tab_bg = bg;
+    }
+    if let Some(fg) = document_value(&doc, "fg").and_then(|v| Color::parse_hex(&v)) {
+        config.tab_fg = fg;
+    }
+    if let Some(active_bg) = document_value(&doc, "active_bg").and_then(|v| Color::parse_hex(&v)) {
+        config.active_tab_bg = active_bg;
+    }
+    if let Some(active_fg) = document_value(&doc, "active_fg").and_then(|v| Color::parse_hex(&v)) {
+        config.active_tab_fg = active_fg;
     }
     if let Some(markers) = document_values(&doc, "project_markers") {
         config.project_markers = dedup_strings(markers);
@@ -1159,6 +1250,93 @@ mod tests {
             config.mode_style(InputMode::Locked).unwrap(),
             &ModeStyle::new(Color::new(255, 102, 102), icons::MODE_LOCKED, "Locked")
         );
+        // Chrome colors default to the previously hardcoded palette.
+        assert_eq!(config.tab_bg, Color::new(40, 44, 65));
+        assert_eq!(config.tab_fg, Color::new(155, 159, 193));
+        assert_eq!(config.active_tab_bg, Color::new(101, 106, 131));
+        assert_eq!(config.active_tab_fg, Color::new(255, 255, 255));
+        // `bar_bg` is unset by default: the background follows the live theme.
+        assert_eq!(config.bar_bg, None);
+        assert_eq!(config.hint_glyph_on, Color::new(255, 255, 255));
+    }
+
+    #[test]
+    fn parse_tabs_block_chrome_colors() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "tabs".to_string(),
+            r##"
+bg "#282c41"
+fg "#9b9fc1"
+active_bg "#656a83"
+active_fg "#ffffff"
+"##
+            .to_string(),
+        );
+
+        let config = Config::from_map(map);
+
+        assert_eq!(config.tab_bg, Color::new(40, 44, 65));
+        assert_eq!(config.tab_fg, Color::new(155, 159, 193));
+        assert_eq!(config.active_tab_bg, Color::new(101, 106, 131));
+        assert_eq!(config.active_tab_fg, Color::new(255, 255, 255));
+    }
+
+    #[test]
+    fn parse_tabs_block_chrome_colors_spaced_equals() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "tabs".to_string(),
+            r##"
+bg = "#112233"
+active_fg = "#abc"
+"##
+            .to_string(),
+        );
+
+        let config = Config::from_map(map);
+
+        assert_eq!(config.tab_bg, Color::new(0x11, 0x22, 0x33));
+        // 3-digit hex expands per Color::parse_hex.
+        assert_eq!(config.active_tab_fg, Color::new(0xAA, 0xBB, 0xCC));
+        // Untouched chrome keeps its default.
+        assert_eq!(config.tab_fg, Color::new(155, 159, 193));
+        assert_eq!(config.active_tab_bg, Color::new(101, 106, 131));
+    }
+
+    #[test]
+    fn parse_bar_chrome_flat_keys() {
+        let mut map = BTreeMap::new();
+        map.insert("bar_bg".to_string(), "#101020".to_string());
+        map.insert("hint_glyph_on".to_string(), "#fafafa".to_string());
+
+        let config = Config::from_map(map);
+
+        assert_eq!(config.bar_bg, Some(Color::new(0x10, 0x10, 0x20)));
+        assert_eq!(config.hint_glyph_on, Color::new(0xfa, 0xfa, 0xfa));
+    }
+
+    #[test]
+    fn invalid_chrome_colors_use_defaults() {
+        let mut map = BTreeMap::new();
+        map.insert("bar_bg".to_string(), "not-a-color".to_string());
+        map.insert("hint_glyph_on".to_string(), "#zzz".to_string());
+        map.insert(
+            "tabs".to_string(),
+            r##"
+bg "nope"
+active_bg "#12"
+"##
+            .to_string(),
+        );
+
+        let config = Config::from_map(map);
+
+        // An unparseable `bar_bg` leaves the override unset (follows the theme).
+        assert_eq!(config.bar_bg, None);
+        assert_eq!(config.hint_glyph_on, Color::new(255, 255, 255));
+        assert_eq!(config.tab_bg, Color::new(40, 44, 65));
+        assert_eq!(config.active_tab_bg, Color::new(101, 106, 131));
     }
 
     #[test]

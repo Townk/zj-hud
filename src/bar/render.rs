@@ -2,7 +2,7 @@ use unicode_width::UnicodeWidthStr;
 use zellij_tile::prelude::InputMode;
 
 use crate::bar::click_map::{ClickAction, ClickMap};
-use crate::bar::config::Config;
+use crate::bar::config::{Config, DEFAULT_BAR_BG};
 use crate::bar::state::AppState;
 use crate::bar::status::system;
 use crate::bar::status::{
@@ -17,32 +17,6 @@ use crate::shared::icons::{LEFT_HALF_BLOCK, SCROLL_LEFT_ARROW, SCROLL_RIGHT_ARRO
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD: &str = "\x1b[1m";
-
-const TAB_BG: Color = Color {
-    r: 40,
-    g: 44,
-    b: 65,
-};
-const TAB_FG: Color = Color {
-    r: 155,
-    g: 159,
-    b: 193,
-};
-const ACTIVE_TAB_BG: Color = Color {
-    r: 101,
-    g: 106,
-    b: 131,
-};
-const ACTIVE_TAB_FG: Color = Color {
-    r: 255,
-    g: 255,
-    b: 255,
-};
-const BAR_BG: Color = Color {
-    r: 30,
-    g: 30,
-    b: 46,
-};
 
 pub struct RenderedSide {
     pub text: String,
@@ -60,14 +34,29 @@ pub struct RenderedBar {
     pub click_map: ClickMap,
 }
 
+/// The effective status-bar background. An explicit `bar_bg` override wins;
+/// otherwise it follows the live Zellij theme
+/// (`style.colors.text_unselected.background`), falling back to
+/// [`DEFAULT_BAR_BG`] until the first `ModeUpdate` lands a `Style`.
+pub(crate) fn resolve_bar_bg(state: &AppState, config: &Config) -> Color {
+    if let Some(bar_bg) = config.bar_bg {
+        return bar_bg;
+    }
+    state
+        .style
+        .map(|style| Color::from_palette(style.colors.text_unselected.background))
+        .unwrap_or(DEFAULT_BAR_BG)
+}
+
 pub fn render_bar(state: &AppState, config: &Config, cols: usize) -> RenderedBar {
+    let bar_bg = resolve_bar_bg(state, config);
     let right = build_right_side(state, config, cols);
     let left_budget = cols.saturating_sub(right.width);
     let left = build_left_side(state, config, left_budget);
 
     let used = left.width + right.width;
     let gap_cols = cols.saturating_sub(used);
-    let gap = format!("{}{}", BAR_BG.to_ansi_bg(), " ".repeat(gap_cols));
+    let gap = format!("{}{}", bar_bg.to_ansi_bg(), " ".repeat(gap_cols));
 
     let mut click_map = left.clicks;
     let mut right_clicks = right.clicks;
@@ -102,6 +91,7 @@ fn render_tabs(
     available: usize,
 ) -> RenderedSide {
     let tab_count = state.tabs.len();
+    let bar_bg = resolve_bar_bg(state, config);
 
     let titles: Vec<_> = state
         .tabs
@@ -134,11 +124,11 @@ fn render_tabs(
             text.push_str(&format!(
                 "{}{}{} {}{}{}{}",
                 ANSI_BOLD,
-                TAB_BG.to_ansi_bg(),
-                TAB_FG.to_ansi_fg(),
+                config.tab_bg.to_ansi_bg(),
+                config.tab_fg.to_ansi_fg(),
                 SCROLL_LEFT_ARROW,
-                BAR_BG.to_ansi_bg(),
-                TAB_BG.to_ansi_fg(),
+                bar_bg.to_ansi_bg(),
+                config.tab_bg.to_ansi_fg(),
                 LEFT_HALF_BLOCK,
             ));
             // Clicking the left chevron jumps one tab beyond the visible
@@ -173,9 +163,9 @@ fn render_tabs(
         let is_active = i == active_idx;
 
         let (bg, fg) = if is_active {
-            (ACTIVE_TAB_BG, ACTIVE_TAB_FG)
+            (config.active_tab_bg, config.active_tab_fg)
         } else {
-            (TAB_BG, TAB_FG)
+            (config.tab_bg, config.tab_fg)
         };
 
         // Overhead is 3 (leading space + trailing space + edge glyph); pass the
@@ -192,7 +182,7 @@ fn render_tabs(
             bg.to_ansi_bg(),
             fg.to_ansi_fg(),
             rendered,
-            BAR_BG.to_ansi_bg(),
+            bar_bg.to_ansi_bg(),
             bg.to_ansi_fg(),
             LEFT_HALF_BLOCK,
         );
@@ -215,11 +205,11 @@ fn render_tabs(
             text.push_str(&format!(
                 "{}{}{} {}{}{}{}",
                 ANSI_BOLD,
-                TAB_BG.to_ansi_bg(),
-                TAB_FG.to_ansi_fg(),
+                config.tab_bg.to_ansi_bg(),
+                config.tab_fg.to_ansi_fg(),
                 SCROLL_RIGHT_ARROW,
-                BAR_BG.to_ansi_bg(),
-                TAB_BG.to_ansi_fg(),
+                bar_bg.to_ansi_bg(),
+                config.tab_bg.to_ansi_fg(),
                 LEFT_HALF_BLOCK,
             ));
             // `scroll.has_right` implies `scroll.right < tab_count - 1`, so
@@ -241,6 +231,8 @@ fn render_tabs(
 }
 
 pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> RenderedSide {
+    let bar_bg = resolve_bar_bg(state, config);
+
     // Drive floating-dialog indicators. Search and Rename hold the client in
     // `Normal` while they intercept text input, so the visible mode can come
     // from shared dialog state instead of the raw client mode.
@@ -286,7 +278,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     // (We build it twice to keep the gradient step count exact — info
     // widgets that have no samples yet should not steal a gradient stop.)
     let widgets_segment_probe = system_info_block
-        .and_then(|block| info_widgets_segment(state, config, block, BAR_BG, cols));
+        .and_then(|block| info_widgets_segment(state, config, block, bar_bg, cols));
     let widgets_present = widgets_segment_probe.is_some();
 
     let segment_count = mode_present as usize
@@ -305,12 +297,12 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     }
 
     let base_color = if is_non_normal {
-        config.mode_color(effective_mode).unwrap_or(TAB_BG)
+        config.mode_color(effective_mode).unwrap_or(config.tab_bg)
     } else {
-        TAB_BG
+        config.tab_bg
     };
 
-    let grad_stops = gradient(base_color, BAR_BG, segment_count + 1);
+    let grad_stops = gradient(base_color, bar_bg, segment_count + 1);
 
     let mut specs: Vec<Color> = Vec::with_capacity(segment_count);
     let mut position = 0usize;
@@ -364,10 +356,11 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
     if mode_hint_present {
         let bg = spec_iter.next().unwrap();
         let seg = match effective_mode {
-            InputMode::Locked => locked_hint_segment(bg, mode_bg),
+            InputMode::Locked => locked_hint_segment(bg, mode_bg, config.hint_glyph_on),
             _ => search_hint_segment(
                 bg,
                 mode_bg,
+                config.hint_glyph_on,
                 state.search_case_sensitive,
                 state.search_whole_word,
                 state.search_wrap,
@@ -381,7 +374,12 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
             .which_key_toggle_key
             .as_deref()
             .expect("which_key_toggle_key present");
-        built.push(Built::Hint(which_key_hidden_hint_segment(bg, mode_bg, key)));
+        built.push(Built::Hint(which_key_hidden_hint_segment(
+            bg,
+            mode_bg,
+            config.hint_glyph_on,
+            key,
+        )));
     }
     if session_present {
         let bg = spec_iter.next().unwrap();
@@ -421,7 +419,7 @@ pub fn build_right_side(state: &AppState, config: &Config, cols: usize) -> Rende
             Built::Widgets(r) => r.segment.bg,
         };
         let left_bg = if idx == 0 {
-            BAR_BG
+            bar_bg
         } else {
             match &built[idx - 1] {
                 Built::Mode(s) | Built::Hint(s) | Built::Session(s) | Built::Time(s) => s.bg,
@@ -584,10 +582,25 @@ toggle_key "Alt ."
 
     #[test]
     fn gap_fills_remaining_width() {
-        let state = AppState::default();
+        use zellij_tile::prelude::{PaletteColor, Style};
+
+        // No `bar_bg` override → the gap fill tracks the live Style background.
+        // The stock Catppuccin theme reports base `#1e1e2e`, which equals the
+        // historical `BAR_BG` default, so the bar is unchanged by this wiring.
+        let mut style = Style::default();
+        style.colors.text_unselected.background = PaletteColor::Rgb((30, 30, 46));
+        let state = AppState {
+            style: Some(style),
+            ..AppState::default()
+        };
         let config = Config::default();
+        assert_eq!(config.bar_bg, None);
+
         let bar = render_bar(&state, &config, 80);
-        assert!(bar.text.contains(&BAR_BG.to_ansi_bg()));
+
+        let expected = resolve_bar_bg(&state, &config);
+        assert_eq!(expected, DEFAULT_BAR_BG);
+        assert!(bar.text.contains(&expected.to_ansi_bg()));
     }
 
     fn tab(position: usize, name: &str, active: bool) -> zellij_tile::prelude::TabInfo {
