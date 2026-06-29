@@ -10,7 +10,7 @@ use crate::whichkey::labels::{
     ModeLabels,
 };
 use crate::whichkey::modes::{group_members, mode_color, mode_icon, str_to_mode};
-use crate::whichkey::theme::{parse_color, ChromeColors};
+use crate::whichkey::theme::{parse_bg_color, parse_color, ChromeColors};
 
 /// Grid fill order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +75,11 @@ pub struct Config {
     /// a mode is named, such as `Command …` switch entries.
     pub mode_labels: ModeLabels,
 
-    /// Panel chrome color overrides (`key`/`label`/`switch`/`border`/`footer`),
-    /// each a ready-to-emit SGR foreground sequence. Applied over the fixed
+    /// Panel chrome color overrides (`key`/`label`/`switch`/`border`/`footer`
+    /// foreground sequences, plus a `background` fill). Applied over the fixed
     /// theme defaults in [`crate::whichkey::theme::Theme::from_style_and_colors`];
-    /// `dim` is never overridden here (it tracks the live palette).
+    /// `dim` is never overridden here (it tracks the live palette). `background`
+    /// is unset by default, leaving the panel's interior on the base background.
     pub chrome: ChromeColors,
 
     /// Binding groups that render contiguously in the configured member order
@@ -205,13 +206,16 @@ impl Config {
         }
         // Panel chrome overrides: each parses a `#RGB`/`#RRGGBB` hex or
         // 256-color index into an SGR sequence; an unparseable value is dropped
-        // so the fixed theme default stands.
+        // so the fixed theme default stands. `background` is the lone background
+        // (`48;…`) override; unset leaves the panel painting no background, so
+        // the interior keeps the pane's base background exactly as before.
         config.chrome = ChromeColors {
             key: map.get("key").and_then(|s| parse_color(s)),
             label: map.get("label").and_then(|s| parse_color(s)),
             switch: map.get("switch").and_then(|s| parse_color(s)),
             border: map.get("border").and_then(|s| parse_color(s)),
             footer: map.get("footer").and_then(|s| parse_color(s)),
+            background: map.get("background").and_then(|s| parse_bg_color(s)),
         };
         if let Some(block) = map.get("groups") {
             config.groups = parse_groups_block(block);
@@ -942,6 +946,55 @@ mod tests {
         assert_eq!(c.chrome.switch.as_deref(), Some("\u{1b}[38;2;137;180;250m"));
         assert_eq!(c.chrome.border.as_deref(), Some("\u{1b}[38;2;137;180;250m"));
         assert_eq!(c.chrome.footer.as_deref(), Some("\u{1b}[38;2;108;112;134m"));
+    }
+
+    #[test]
+    fn panel_background_unset_is_none() {
+        // Default and a map without `background` both leave the fill unset, so
+        // the panel paints no background (today's behavior).
+        assert_eq!(Config::default().chrome.background, None);
+        let mut m = BTreeMap::new();
+        m.insert("border".into(), "#89B4FA".into()); // unrelated chrome key
+        assert_eq!(Config::from_map(&m).chrome.background, None);
+    }
+
+    #[test]
+    fn panel_background_parses_hex_and_index() {
+        // A configured background becomes a background SGR (`48;…`), not the
+        // `38;…` foreground the other chrome keys parse to.
+        let mut m = BTreeMap::new();
+        m.insert("background".into(), "#181825".into()); // Catppuccin mantle
+        assert_eq!(
+            Config::from_map(&m).chrome.background.as_deref(),
+            Some("\u{1b}[48;2;24;24;37m")
+        );
+        let mut m = BTreeMap::new();
+        m.insert("background".into(), "0".into()); // 256-color index
+        assert_eq!(
+            Config::from_map(&m).chrome.background.as_deref(),
+            Some("\u{1b}[48;5;0m")
+        );
+    }
+
+    #[test]
+    fn panel_background_invalid_is_dropped() {
+        let mut m = BTreeMap::new();
+        m.insert("background".into(), "nope".into());
+        assert_eq!(Config::from_map(&m).chrome.background, None);
+        let mut m = BTreeMap::new();
+        m.insert("background".into(), "#12".into());
+        assert_eq!(Config::from_map(&m).chrome.background, None);
+    }
+
+    #[test]
+    fn panel_background_round_trips_through_from_block() {
+        // The bar forwards the `which_key { … }` block verbatim, so `background`
+        // must survive `from_block` (one node per line → from_map).
+        let c = Config::from_block("background \"#181825\"\n");
+        assert_eq!(
+            c.chrome.background.as_deref(),
+            Some("\u{1b}[48;2;24;24;37m")
+        );
     }
 
     #[test]

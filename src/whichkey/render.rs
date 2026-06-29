@@ -13,7 +13,7 @@
 use crate::shared::geometry::Padding;
 use crate::whichkey::footer::Footer;
 use crate::whichkey::grid::Layout;
-use crate::whichkey::theme::Theme;
+use crate::whichkey::theme::{Theme, RESET};
 
 /// Shown when the current mode has no (non-no-op) keybindings.
 pub const NO_BINDINGS: &str = "(no keybindings for this mode)";
@@ -69,9 +69,17 @@ pub fn paint(
     let footer_chrome = &theme.footer;
     let reset = &theme.reset;
 
+    // Clear the pane. With a configured panel background, lay it down as the
+    // base fill on every cell and leave it active so the frame/body/footer paint
+    // onto it — their colored spans return to it through the theme's softened
+    // `reset`. Unset → plain spaces and no background SGR at all, byte-for-byte
+    // as before.
     let blank = " ".repeat(cols);
     for row in 1..=rows {
-        out.push_str(&format!("\u{1b}[{row};1H{blank}"));
+        match &theme.bg {
+            Some(bg) => out.push_str(&format!("\u{1b}[{row};1H{bg}{blank}")),
+            None => out.push_str(&format!("\u{1b}[{row};1H{blank}")),
+        }
     }
 
     // Top border with the mode breadcrumb (pre-colored): ╭ <a » b> ─╮
@@ -137,6 +145,12 @@ pub fn paint(
         }
     }
 
+    // Close the fill with a hard reset so the pane doesn't end with the
+    // background left active (the softened `reset` re-asserts it after every
+    // span, including the last). No-op when no background is configured.
+    if theme.bg.is_some() {
+        out.push_str(RESET);
+    }
     out
 }
 
@@ -255,5 +269,45 @@ mod tests {
         };
         let out = paint(&body, None, 6, 14, &frame(&theme, p));
         assert!(out.contains("\u{1b}[3;4Ha"));
+    }
+
+    #[test]
+    fn paint_without_background_emits_no_background_sgr() {
+        // The default theme has no panel background, so the renderer must emit
+        // no background SGR at all — the interior keeps the pane's base bg.
+        let theme = Theme::default();
+        let body = vec!["a".to_string()];
+        let out = paint(
+            &body,
+            Some(&footer("x close", Some("1/2"))),
+            5,
+            12,
+            &frame(&theme, pad()),
+        );
+        assert!(!out.contains("\u{1b}[48")); // neither 48;2 nor 48;5
+    }
+
+    #[test]
+    fn paint_with_background_fills_every_row_and_closes_it() {
+        // A theme as built by `from_style_and_colors` for a configured bg: the
+        // fill plus the softened reset that re-asserts it.
+        let bg = "\u{1b}[48;2;24;24;37m"; // Catppuccin mantle
+        let theme = Theme {
+            bg: Some(bg.to_string()),
+            reset: format!("\u{1b}[0m{bg}"),
+            ..Theme::default()
+        };
+        let body = vec!["a".to_string(), "b".to_string()];
+        let out = paint(&body, None, 4, 12, &frame(&theme, pad()));
+        // The background is laid down as the base fill at the start of every row.
+        for row in 1..=4 {
+            assert!(out.contains(&format!("\u{1b}[{row};1H{bg}")));
+        }
+        // The frame + body still render on top of the fill.
+        assert!(out.contains(TL));
+        assert!(out.contains("\u{1b}[2;3Ha"));
+        // The stream ends with a hard reset so the fill isn't left active.
+        assert!(out.ends_with("\u{1b}[0m"));
+        assert!(!out.contains('\n'));
     }
 }

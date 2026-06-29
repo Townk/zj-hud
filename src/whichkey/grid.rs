@@ -681,6 +681,7 @@ mod tests {
             border: "\u{1b}[38;5;5m".into(),
             footer: "\u{1b}[38;5;6m".into(),
             dim: "\u{1b}[2m".into(),
+            bg: None,
             reset: "\u{1b}[0m".into(),
         };
         let icon_sgr = "\u{1b}[38;5;9m";
@@ -722,6 +723,7 @@ mod tests {
             border: "\u{1b}[38;5;5m".into(),
             footer: "\u{1b}[38;5;6m".into(),
             dim: "\u{1b}[2m".into(),
+            bg: None,
             reset: "\u{1b}[0m".into(),
         };
         let entries = vec![entry(&["a"], "act")];
