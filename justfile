@@ -87,7 +87,10 @@ release version:
         exit 1
     fi
 
-    git fetch --quiet origin master --tags
+    # --force: CI moves a rolling "latest" prerelease tag on every push to
+    # master, so a plain --tags fetch fails ("would clobber existing tag
+    # latest") and, under set -e, kills this recipe before the version bump.
+    git fetch --quiet --force origin master --tags
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
         echo "error: tag $tag already exists" >&2
         exit 1
